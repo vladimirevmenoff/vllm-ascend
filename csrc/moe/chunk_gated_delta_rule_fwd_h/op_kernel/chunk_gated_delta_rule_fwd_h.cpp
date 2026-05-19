@@ -13,6 +13,7 @@
  */
 
 // #include "chunk_gated_delta_rule_fwd_h.h"
+#include "compat_310p.h"
 #include "gemm/kernel/gdn_fwd_h_kernel.hpp"
 #include "lib/matmul_intf.h"
 
