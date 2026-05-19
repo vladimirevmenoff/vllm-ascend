@@ -7,6 +7,7 @@
 
 #if !defined(__bfloat16_t_defined)
 #define __bfloat16_t_defined
+#define __COMPAT_310P_ACTIVE__
 struct bfloat16_t {
     uint16_t val;
     bfloat16_t() = default;
@@ -18,6 +19,11 @@ struct bfloat16_t {
 // 310P has no fixpipe unit; post-matmul stores go through MTE3
 #ifndef PIPE_FIX
 #define PIPE_FIX PIPE_MTE3
+#endif
+
+// 310P renames LoadDataWithSparse → LoadDataWithSparseCal
+#ifdef __COMPAT_310P_ACTIVE__
+#define LoadDataWithSparse LoadDataWithSparseCal
 #endif
 
 #endif
