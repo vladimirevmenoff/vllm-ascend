@@ -110,6 +110,7 @@ __aicore__ inline void DataCopyCustom(GlobalTensor<T> dstGm, LocalTensor<T> inLo
                     for (uint32_t i = 0; i < elem; i++) {
                         tmp[i] = inLocal.GetValue(elem - 1 - i);
                     }
+                    SetWaitFlag<HardEvent::V_S>(HardEvent::V_S);
                     DataCopyParams copyParamslast = {1, 1, 0, 0};
                     SetWaitFlag<HardEvent::MTE3_MTE2>(HardEvent::S_MTE2);
                     SetWaitFlag<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
