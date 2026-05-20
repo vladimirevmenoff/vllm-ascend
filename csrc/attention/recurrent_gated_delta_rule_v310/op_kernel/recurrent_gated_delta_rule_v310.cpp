@@ -13,6 +13,7 @@
  */
 #include "recurrent_gated_delta_rule_v310.h"
 
+// HELLO CI TESTING
 
 using namespace AscendC;
 using namespace RecurrentGatedDeltaRuleV310;
