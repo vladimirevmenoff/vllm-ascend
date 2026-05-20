@@ -329,15 +329,6 @@ public:
 
             // VEC1: v_new epilogue
             if (cubeBlockScheduler.NeedProcessStage1()) {
-                if (AscendC::GetBlockIdx() == 0 && cubeBlockScheduler.iterId <= 2) {
-                    AscendC::PipeBarrier<PIPE_ALL>();
-                    float ws0 = gmVWorkspace.GetValue(stage1Offsets.vWorkOffset);
-                    float ws1 = gmVWorkspace.GetValue(stage1Offsets.vWorkOffset + 1);
-                    float ws2 = gmVWorkspace.GetValue(stage1Offsets.vWorkOffset + 128);
-                    float ws3 = gmVWorkspace.GetValue(stage1Offsets.vWorkOffset + 129);
-                    AscendC::printf("WS iter=%d [0,0]=%f [0,1]=%f [1,0]=%f [1,1]=%f\n",
-                        cubeBlockScheduler.iterId, ws0, ws1, ws2, ws3);
-                }
                 epilogueGDNFwdHVnew(
                     gmV[stage1Offsets.uvOffset], gmVUpdateWorkspace[stage1Offsets.vWorkOffset],
                     gmG[stage1Offsets.gOffset], gmU[stage1Offsets.uvOffset], gmVWorkspace[stage1Offsets.vWorkOffset],

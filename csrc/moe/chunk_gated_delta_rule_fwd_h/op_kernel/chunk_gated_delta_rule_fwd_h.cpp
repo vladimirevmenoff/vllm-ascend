@@ -30,18 +30,6 @@ extern "C" __global__ __aicore__ void chunk_gated_delta_rule_fwd_h(GM_ADDR k, GM
 
     __gm__ ChunkGatedDeltaRuleFwdHTilingData *__restrict gdnFwdHTilingData = reinterpret_cast<__gm__ ChunkGatedDeltaRuleFwdHTilingData *__restrict>(tiling);
 
-    if (AscendC::GetBlockIdx() == 0) {
-        AscendC::printf("ARCH cce=%d catlass=%d\n", (int)__CCE_AICORE__, (int)CATLASS_ARCH);
-#ifdef CATLASS_UNIFIED_CORE
-        AscendC::printf("UNIFIED=1\n");
-#else
-        AscendC::printf("UNIFIED=0\n");
-#endif
-        AscendC::printf("dt=%d gdt=%d sdt=%d csz=%d\n",
-            (int)gdnFwdHTilingData->dataType, (int)gdnFwdHTilingData->gDataType,
-            (int)gdnFwdHTilingData->stateDataType, (int)gdnFwdHTilingData->chunkSize);
-    }
-
     using workspaceType = float;
     // dtype: 0 - fp16, 1 - bf16, 2 - fp32
 #ifndef CATLASS_UNIFIED_CORE
