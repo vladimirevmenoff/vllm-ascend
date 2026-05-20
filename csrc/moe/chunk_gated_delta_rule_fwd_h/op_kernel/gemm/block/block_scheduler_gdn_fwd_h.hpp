@@ -178,6 +178,11 @@ struct BlockSchedulerGdnFwdH {
         taskIdx = cubeCoreIdx * headInnerLoop;
         isRunning = taskIdx < taskNum;
 
+        if (coreIdx == 0) {
+            AscendC::printf("SCHED_INIT core=%d/%d taskNum=%d vLoops=%d totalChunks=%d headInnerLoop=%d taskLoops=%d hasDummy=%d isRunning=%d\n",
+                coreIdx, coreNum, taskNum, vLoops, totalChunks, headInnerLoop, taskLoops, (int)hasDummyHead, (int)isRunning);
+        }
+
     }
 
     CATLASS_DEVICE
@@ -221,10 +226,17 @@ struct BlockSchedulerGdnFwdH {
         offsets[currStage].hWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + currStage) * kHeadDim * vHeadDim;
         offsets[currStage].vWorkOffset = (cubeCoreIdx * PING_PONG_STAGES + currStage) * chunkSize * vHeadDim;
         offsets[currStage].blockTokens = offsets[currStage].isFinalState ? (batchTokens - chunkIdx * chunkSize) : chunkSize;
-        offsets[currStage].isDummyHead = headInnerLoop < PING_PONG_STAGES && headInnerIdx >= headInnerLoop; 
-        offsets[currStage].batchIdx = batchIdx; 
-        offsets[currStage].headIdx = vHeadIdx; 
-        offsets[currStage].chunkIdx = chunkIdx; 
+        offsets[currStage].isDummyHead = headInnerLoop < PING_PONG_STAGES && headInnerIdx >= headInnerLoop;
+        offsets[currStage].batchIdx = batchIdx;
+        offsets[currStage].headIdx = vHeadIdx;
+        offsets[currStage].chunkIdx = chunkIdx;
+
+        if (cubeCoreIdx == 0) {
+            AscendC::printf("INIT_TASK iter=%d stg=%d chunk=%d hiIdx=%d dummy=%d isFinal=%d hSrc=%d hDst=%d\n",
+                iterId, currStage, chunkIdx, headInnerIdx,
+                (int)offsets[currStage].isDummyHead, (int)offsets[currStage].isFinalState,
+                offsets[currStage].hSrcOffset, offsets[currStage].hDstOffset);
+        }
 
         processNewTask = chunkIdx == batchChunks - 1 && headInnerIdx == PING_PONG_STAGES - 1;
         if (processNewTask) {
@@ -253,7 +265,13 @@ struct BlockSchedulerGdnFwdH {
     CATLASS_DEVICE
     bool NeedProcessStage2() {
         GDNFwdHOffsets& stage2Offsets = GetStage2Offsets();
-        return !(iterId == 1 || (!storeFinalState && stage2Offsets.isFinalState) || stage2Offsets.isDummyHead);
+        bool result = !(iterId == 1 || (!storeFinalState && stage2Offsets.isFinalState) || stage2Offsets.isDummyHead);
+        if (cubeCoreIdx == 0) {
+            AscendC::printf("NEED_S2 iter=%d sFS=%d s2Final=%d s2Dummy=%d -> %d\n",
+                iterId, (int)storeFinalState, (int)stage2Offsets.isFinalState,
+                (int)stage2Offsets.isDummyHead, (int)result);
+        }
+        return result;
     }
 };
 
