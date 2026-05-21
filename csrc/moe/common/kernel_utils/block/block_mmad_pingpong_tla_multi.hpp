@@ -641,15 +641,13 @@ public:
             uint32_t tileElems = mAligned * nAligned;
             uint32_t tileBytes = tileElems * sizeof(ElementAccumulator);
 
-            // CO2 buffer for L0C output (correct position for CO1→CO2 path)
             AscendC::LocalTensor<ElementAccumulator> co2Temp =
                 resourcePtr->ubBuf.template GetBufferByByte<ElementAccumulator>(0);
 
             AscendC::PipeBarrier<PIPE_ALL>();
 
-            // L0C → UB via BLOCK_MODE_MATRIX (raw NZ fractal copy, no deformat)
-            // Units: blockLen in 1024B for float, srcStride in 1024B, dstStride in 32B
-            constexpr uint32_t FRACTAL_SIZE = 16 * 16 * sizeof(ElementAccumulator); // 1024 for float
+            // L0C → UB: BLOCK_MODE_MATRIX copies raw NZ fractals to UB
+            // For float: blockLen unit = 1024B (one 16×16 fractal)
             AscendC::DataCopyParams l0c2ubParams;
             l0c2ubParams.blockCount = static_cast<uint8_t>(nAligned / 16);
             l0c2ubParams.blockLen = static_cast<uint16_t>(mAligned / 16);
@@ -660,18 +658,28 @@ public:
             AscendC::DataCopy(co2Temp, l0CTensorList[l0CListId], l0c2ubParams, enhParams);
             AscendC::PipeBarrier<PIPE_ALL>();
 
-            // UB → GM with NZ→ND deformat
+            // UB → GM: fractal-by-fractal with strided DataCopy (NZ→ND deformat)
+            // NZ in UB: [N/16 Z-cols][M/16 fractals][16 rows][16 cols]
+            // ND in GM: [M rows][N cols]
             auto dstOffset = tensorC.layout()(tensorC.coord());
             uint32_t gmStride = tla::get<0>(tensorC.stride());
-            AscendC::Nz2NdParamsFull nz2ndParams;
-            nz2ndParams.ndNum = 1;
-            nz2ndParams.nValue = static_cast<uint16_t>(mBlockActual);
-            nz2ndParams.dValue = static_cast<uint16_t>(nAligned);
-            nz2ndParams.srcNdMatrixStride = 1;
-            nz2ndParams.srcNStride = static_cast<uint16_t>(mAligned);
-            nz2ndParams.dstDStride = static_cast<uint16_t>(gmStride);
-            nz2ndParams.dstNdMatrixStride = 1;
-            AscendC::DataCopy(tensorC.data()[dstOffset], co2Temp, nz2ndParams);
+            uint32_t mFracs = mAligned / 16;
+            uint32_t nFracs = nAligned / 16;
+            for (uint32_t nf = 0; nf < nFracs; nf++) {
+                for (uint32_t mf = 0; mf < mFracs; mf++) {
+                    uint32_t ubOff = (nf * mFracs + mf) * 256;
+                    uint32_t gmRow = mf * 16;
+                    uint32_t gmCol = nf * 16;
+                    uint32_t gmOff = dstOffset + gmRow * gmStride + gmCol;
+                    AscendC::DataCopyParams fracParams;
+                    fracParams.blockCount = 16;
+                    fracParams.blockLen = static_cast<uint16_t>(16 * sizeof(ElementAccumulator) / 32);
+                    fracParams.srcStride = 0;
+                    fracParams.dstStride = static_cast<uint16_t>((gmStride - 16) * sizeof(ElementAccumulator) / 32);
+                    AscendC::DataCopy(tensorC.data()[gmOff], co2Temp[ubOff], fracParams);
+                }
+            }
+            AscendC::PipeBarrier<PIPE_ALL>();
 
             AscendC::PipeBarrier<PIPE_ALL>();
             l0CListId = (l0CListId + 1 < L0C_STAGES) ? (l0CListId + 1) : 0;
