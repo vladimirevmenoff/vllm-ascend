@@ -1,0 +1,97 @@
+api: pytorch
+api_type: chunk_fwd_o_v310_custom
+version: v1.0
+name: torch.ops._C_ascend.chunk_fwd_o
+aclnn_name: ChunkFwdO
+
+dtype_numbers: 200
+extra_numbers: all
+compute_times: null
+expected_error_msg: null
+generate: chunk_fwd_o_v310
+backward: false
+
+standard:
+  acc: default
+  perf: not_key
+
+size_distributions:
+  - values: [[64, 256]]
+    ratio: 0.5
+  - values: [[256, 2048]]
+    ratio: 0.4
+  - values: [[2048, 8192]]
+    ratio: 0.1
+
+inputs:
+  # q: [B, Hv, T, Kdim]
+  - name: q
+    type: tensor
+    required: true
+    dtypes: { values: [fp16] }
+    shapes: { dim_numbers: { values: [4] }, max_length: 4294967295 }
+    ranges:
+      valid:   { values: [[-0.1, 0.1]] }
+      invalid: { values: [[-0.1, 0.1]] }
+    boundary: { has_empty: false, has_infnan: false, has_scalar: false, has_upper_border: false, has_lower_border: false }
+
+  # k: [B, Hv, T, Kdim]
+  - name: k
+    type: tensor
+    required: true
+    dtypes: { values: [fp16] }
+    shapes: { dim_numbers: { values: [4] }, max_length: 4294967295 }
+    ranges:
+      valid:   { values: [[-0.1, 0.1]] }
+      invalid: { values: [[-0.1, 0.1]] }
+    boundary: { has_empty: false, has_infnan: false, has_scalar: false, has_upper_border: false, has_lower_border: false }
+
+  # v (v_new from fwd_h): [B, Hv, T, Vdim]
+  - name: v
+    type: tensor
+    required: true
+    dtypes: { values: [fp16] }
+    shapes: { dim_numbers: { values: [4] }, max_length: 4294967295 }
+    ranges:
+      valid:   { values: [[-0.1, 0.1]] }
+      invalid: { values: [[-0.1, 0.1]] }
+    boundary: { has_empty: false, has_infnan: false, has_scalar: false, has_upper_border: false, has_lower_border: false }
+
+  # h (h_out from fwd_h): [B, Hv, NT, Kdim, Vdim]
+  - name: h
+    type: tensor
+    required: true
+    dtypes: { values: [fp16] }
+    shapes: { dim_numbers: { values: [5] }, max_length: 4294967295 }
+    ranges:
+      valid:   { values: [[-0.05, 0.05]] }
+      invalid: { values: [[-0.05, 0.05]] }
+    boundary: { has_empty: false, has_infnan: false, has_scalar: false, has_upper_border: false, has_lower_border: false }
+
+  # scale: float, typically 1/sqrt(Kdim)
+  - name: scale
+    type: attr
+    required: true
+    dtypes: { values: [float] }
+    ranges:
+      valid:   { values: [[0.05, 0.15]] }
+      invalid: { values: [[0.05, 0.15]] }
+
+  # g: [B, Hv, T] fp32, <= 0 (cum log-gate, same as fwd_h)
+  - name: g
+    type: tensor
+    required: false
+    dtypes: { values: [fp32] }
+    shapes: { dim_numbers: { values: [3] }, max_length: 4294967295 }
+    ranges:
+      valid:   { values: [[-0.1, 0.0]] }
+      invalid: { values: [[-0.1, 0.0]] }
+    boundary: { has_empty: false, has_infnan: false, has_scalar: false, has_upper_border: false, has_lower_border: false }
+
+  - name: chunk_size
+    type: attr
+    required: true
+    dtypes: { values: [int] }
+    ranges:
+      valid:   { values: [64] }
+      invalid: { values: [64] }

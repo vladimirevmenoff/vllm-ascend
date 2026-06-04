@@ -53,9 +53,22 @@ log "env: ASCEND_HOME_PATH=${ASCEND_HOME_PATH:-<unset>} ASCEND_TOOLKIT_HOME=${AS
 if [[ "$SOC_VERSION" =~ ^ascend310 ]]; then
     log "matched SOC branch: ascend310"
     # ASCEND310P series
+    # dependency: catlass (required by chunk_gated_delta_rule_fwd_h)
+    CATLASS_PATH=${ROOT_DIR}/csrc/third_party/catlass/include
+    if [[ ! -d "${CATLASS_PATH}" ]]; then
+        echo "dependency catlass is missing at ${CATLASS_PATH}."
+        echo "run: git submodule update --init --recursive"
+        exit 1
+    fi
+    ABSOLUTE_CATLASS_PATH=$(cd "${CATLASS_PATH}" && pwd)
+    export CPATH=${ABSOLUTE_CATLASS_PATH}:${CPATH}
+    log "catlass include=${ABSOLUTE_CATLASS_PATH}"
+
     CUSTOM_OPS_ARRAY=(
         "causal_conv1d_v310"
         "recurrent_gated_delta_rule_v310"
+        "chunk_gated_delta_rule_fwd_h"
+        "chunk_fwd_o"
     )
     CUSTOM_OPS=$(IFS=';'; echo "${CUSTOM_OPS_ARRAY[*]}")
     SOC_ARG="ascend310p"
@@ -157,7 +170,7 @@ elif [[ "$SOC_VERSION" =~ ^ascend910_93 ]]; then
     TARGET_DIR="$SCRIPT_DIR/mc2/moe_combine_normal/op_kernel/utils/"
     echo "$TARGET_DIR"
     cp "$HCCL_STRUCT_FILE_PATH" "$TARGET_DIR"
-    
+
     CUSTOM_OPS_ARRAY=(
         "scatter_nd_update_v2"
         "grouped_matmul_swiglu_quant_weight_nz_tensor_list"
