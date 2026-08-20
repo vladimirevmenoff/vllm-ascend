@@ -123,6 +123,7 @@ class KernelComputeWy {
     pipe_->InitBuffer(lamOffBuf_, ATTEN_ELEMS * sizeof(uint32_t));
     pipe_->InitBuffer(gOffBuf_, FIXED_CHUNK_SIZE * sizeof(uint32_t));
     pipe_->InitBuffer(betaOffBuf_, FIXED_CHUNK_SIZE * sizeof(uint32_t));
+    pipe_->InitBuffer(lane0OffBuf_, FIXED_CHUNK_SIZE * sizeof(uint32_t));
     pipe_->InitBuffer(betaHalfBuf_, FIXED_CHUNK_SIZE * sizeof(half));
     BuildLambdaTable();
     BuildColumnGatherTables();
@@ -151,9 +152,11 @@ class KernelComputeWy {
   __aicore__ inline void BuildColumnGatherTables() {
     LocalTensor<uint32_t> gOff = gOffBuf_.Get<uint32_t>();
     LocalTensor<uint32_t> betaOff = betaOffBuf_.Get<uint32_t>();
+    LocalTensor<uint32_t> lane0 = lane0OffBuf_.Get<uint32_t>();
     for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
       gOff.SetValue(i, i * vNumHead_ * static_cast<uint32_t>(sizeof(float)));
       betaOff.SetValue(i, i * vNumHead_ * static_cast<uint32_t>(sizeof(half)));
+      lane0.SetValue(i, i * FIXED_CHUNK_SIZE * static_cast<uint32_t>(sizeof(float)));
     }
   }
 
@@ -304,12 +307,14 @@ class KernelComputeWy {
                                           LocalTensor<float> expGLocal, LocalTensor<float> gRaw,
                                           LocalTensor<float> loadScratch, uint32_t loadScratchElems) {
     LoadHeadScalarChunk(gGm_, gRaw, loadScratch, loadScratchElems, b, tokenStart, vHeadIdx, vNumHead_);
-    float running = 0.0f;
-    for (uint32_t localT = 0; localT < FIXED_CHUNK_SIZE; ++localT) {
-      running += gRaw.GetValue(localT);
-      gLocal.SetValue(localT, running);
-    }
+    // Inclusive prefix sum as a 6-round vector scan (was a 64-step scalar RMW
+    // loop — one of the serial scalar hotspots behind the 0.73 issue ratio).
+    Adds(gLocal, gRaw, 0.0f, FIXED_CHUNK_SIZE);
     PipeBarrier<PIPE_V>();
+    for (uint32_t sh = 1; sh < FIXED_CHUNK_SIZE; sh <<= 1) {
+      Add(gLocal[sh], gLocal[sh], gLocal, FIXED_CHUNK_SIZE - sh);
+      PipeBarrier<PIPE_V>();
+    }
     Exp(expGLocal, gLocal, FIXED_CHUNK_SIZE);
     PipeBarrier<PIPE_V>();
     const uint64_t dstOffset = BhtOffset(b, vHeadIdx, tokenStart, vNumHead_);
@@ -376,23 +381,40 @@ class KernelComputeWy {
                                                       LocalTensor<float> absScratch,
                                                       LocalTensor<float> rowSums,
                                                       LocalTensor<float> reduceScratch) const {
-    // A is strict-lower, so reducing full rows also computes their absolute
-    // lower-triangle sums. Keep the scan on the vector pipe; only 64 reduced
-    // scalars cross to the scalar unit.
+    // A is strict-lower, so full-row sums equal the |lower-triangle| sums.
+    // Fold columns in 6 strided vector Adds (was 64 serialized ReduceSums),
+    // then two whole-tensor reductions; exactly TWO scalars cross to S.
     Abs(absScratch, a, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
-    for (uint32_t row = 0; row < FIXED_CHUNK_SIZE; ++row) {
-      ReduceSum(rowSums[row], absScratch[row * FIXED_CHUNK_SIZE], reduceScratch, FIXED_CHUNK_SIZE);
+    const uint32_t rowBlk = FIXED_CHUNK_SIZE * sizeof(float) / BLOCK_BYTES;
+    for (uint32_t w = FIXED_CHUNK_SIZE / 2; w >= FLOAT_PER_BLOCK; w >>= 1) {
+      const BinaryRepeatParams rp{1, 1, 1, static_cast<uint8_t>(rowBlk), static_cast<uint8_t>(rowBlk),
+                                  static_cast<uint8_t>(rowBlk)};
+      Add(absScratch, absScratch, absScratch[w], static_cast<uint64_t>(w), FIXED_CHUNK_SIZE, rp);
       PipeBarrier<PIPE_V>();
     }
-    SyncEvent<HardEvent::V_S>(HardEvent::V_S);
-    for (uint32_t row = 0; row < FIXED_CHUNK_SIZE; ++row) {
-      const float rowSum = rowSums.GetValue(row);
-      if (rowSum != rowSum || rowSum >= FP32_FS_ROW_SUM_THRESHOLD) {
-        return true;
-      }
+    // Rows now hold their sum spread over the first 8 lanes; ReduceSum of that
+    // 8-lane block per row == row sum. Gather the per-row 8-lane partials into
+    // rowSums via one strided Add tree is done; finish with global max + sum.
+    // Max of (partial-lane values) >= threshold/8 is NOT exact — instead reduce
+    // each row's 8 lanes with one more strided fold to lane 0:
+    for (uint32_t w = FLOAT_PER_BLOCK / 2; w >= 1; w >>= 1) {
+      const BinaryRepeatParams rp{1, 1, 1, static_cast<uint8_t>(rowBlk), static_cast<uint8_t>(rowBlk),
+                                  static_cast<uint8_t>(rowBlk)};
+      Add(absScratch, absScratch, absScratch[w], static_cast<uint64_t>(w), FIXED_CHUNK_SIZE, rp);
+      PipeBarrier<PIPE_V>();
     }
-    return false;
+    // Lane 0 of each row now holds the full |row| sum; pack the 64 strided
+    // lane-0 values with one Gather (offset table built once per launch).
+    Gather(rowSums, absScratch, lane0OffBuf_.Get<uint32_t>(), 0U, FIXED_CHUNK_SIZE);
+    PipeBarrier<PIPE_V>();
+    ReduceMax(reduceScratch, rowSums, reduceScratch[8], FIXED_CHUNK_SIZE, /*calIndex=*/false);
+    PipeBarrier<PIPE_V>();
+    ReduceSum(reduceScratch[1], rowSums, reduceScratch[32], FIXED_CHUNK_SIZE);
+    SyncEvent<HardEvent::V_S>(HardEvent::V_S);
+    const float maxSum = reduceScratch.GetValue(0);
+    const float totSum = reduceScratch.GetValue(1);
+    return (totSum != totSum) || (maxSum >= FP32_FS_ROW_SUM_THRESHOLD);
   }
 
   // Stable in-place solve R = (I-A)^-1 R for a single RHS block. Processing rows
@@ -551,7 +573,7 @@ class KernelComputeWy {
   GlobalTensor<float> gGm_, gKernelGm_;
   WyCubeGemm cubeGemm_;
   TBuf<TPosition::VECCALC> halfBuf_, qHalfBuf_, rhsBuf_, attnBuf_, gBuf_,
-      expGBuf_, tmpBuf_, rowBuf_, negABuf_, lamOffBuf_, gOffBuf_, betaOffBuf_, betaHalfBuf_, mmLocalWsBuf_;
+      expGBuf_, tmpBuf_, rowBuf_, negABuf_, lamOffBuf_, gOffBuf_, betaOffBuf_, lane0OffBuf_, betaHalfBuf_, mmLocalWsBuf_;
 };
 
 }  // namespace ChunkGatedDeltaRuleComputeWy
