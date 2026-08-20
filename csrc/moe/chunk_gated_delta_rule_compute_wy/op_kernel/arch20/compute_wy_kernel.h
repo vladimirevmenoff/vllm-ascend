@@ -429,7 +429,7 @@ class KernelComputeWy {
   __aicore__ inline void Fp32ForwardSubstitution(const LocalTensor<float> a, LocalTensor<float> r, uint32_t dim,
                                                  uint32_t lda, LocalTensor<half> aHalf, LocalTensor<half> bHalf,
                                                  LocalTensor<float> cScratch) {
-    constexpr uint32_t BLK = 8;
+    constexpr uint32_t BLK = 16;
     SyncEvent<HardEvent::V_S>(HardEvent::V_S);
     for (uint32_t b0 = 0; b0 < FIXED_CHUNK_SIZE; b0 += BLK) {
       if (b0 > 0) {
@@ -458,8 +458,9 @@ class KernelComputeWy {
         const uint32_t rRowOffset = row * lda;
         for (uint32_t col = b0; col < row; ++col) {
           const float coefficient = a.GetValue(aRowOffset + col);
+          // No per-Axpy barrier: the V queue executes in order, and every
+          // dependency in this chain is V-to-V.
           Axpy(r[rRowOffset], r[col * lda], coefficient, static_cast<int32_t>(dim));
-          PipeBarrier<PIPE_V>();
         }
       }
       SyncEvent<HardEvent::V_S>(HardEvent::V_S);
