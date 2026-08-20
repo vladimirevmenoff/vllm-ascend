@@ -506,6 +506,7 @@ class KernelComputeWy {
     // both the g gather source and the in-flight Kβ product.
     SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
     BuildCumulativeG(b, vHeadIdx, tokenStart, gLocal, expGLocal, reduceScratch, attnLocal, ATTEN_ELEMS);
+    // STAGECUT_1_loads_bk_g
 
     // Cube: G = Kβ @ K^T → attnLocal; then A = −strictlower(G ⊙ Λ).
     CastFloatRowsToHalf(qHalf, rhs, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
@@ -515,6 +516,7 @@ class KernelComputeWy {
     Muls(attnLocal, attnLocal, -1.0f, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
     ApplyLambdaNegStrictLower(attnLocal, gLocal, scratch);
+    // STAGECUT_2_gram_lambda
 
     // Pass-1 RHS: rhs already holds βK; apply γ = exp(a) in place → W RHS.
     BroadcastMulRowsFloat(rhs, rhs, expGLocal, scratch, FIXED_CHUNK_SIZE, kHeadDim_, alignK_, alignK_);
@@ -529,6 +531,7 @@ class KernelComputeWy {
     if (!useFp32ForwardSubstitution) {
       BuildT(attnLocal, scratch, cScratch, qHalf, qHalf[ATTEN_ELEMS]);
     }
+    // STAGECUT_3_gate_buildT
 
     // ---- W = T @ (γβK), resident in rhs. halfLocal stages R halves. ----
     if (useFp32ForwardSubstitution) {
@@ -540,6 +543,7 @@ class KernelComputeWy {
     SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     StoreBhtdChunk(wKernelGm_, halfLocal, b, vHeadIdx, tokenStart, vNumHead_, kHeadDim_, alignK_);
     SyncEvent<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
+    // STAGECUT_4_w_apply_store
 
     // ---- U = T @ (βV): load V only now. ----
     LoadBthdChunk(vGm_, halfLocal, b, tokenStart, vHeadIdx, vNumHead_, vHeadDim_, alignV_);
