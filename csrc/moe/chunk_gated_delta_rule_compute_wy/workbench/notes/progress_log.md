@@ -27,3 +27,11 @@ full 9-shape battery (seed-7 data IS the adversarial case).
 npu-pipe-optimizer: hand YAML (wy_hand.yaml) parses; rolled-mode flag synth
 FAILS (9 unorderable hazards) — buffer aliasing from the UB diet blocks
 overlap; revisit post-gate-fix with 24KB freed.
+
+## thr-1.5 verdict (2026-08-20 ~19:40): ALL 9 PASS cos>=0.9999999; kept (a5a25384a+followup).
+Canonical 4312us (-8%). New decomposition: fast path = ~12 IterateAll x ~10us lib
+overhead/call. NOTE: the "any 128-dim cube call hangs" lore (drove all <=64 slicing,
+64^3 tilings) was established on STALE BINARIES — may be phantom. De-slice probe next:
+gram single K=128 call + applies nDim=128 single call. If clean: calls/task halve.
+Then: async Iterate pairing (square || apply), early-exit rounds when P underflows
+(production Λ-decay win), npu-pipe overlap w/ un-aliased buffers.
