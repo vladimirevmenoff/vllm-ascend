@@ -15,3 +15,15 @@ Known candidates (user-flagged): single doubling chain for both RHS (two-pass re
 cube work); per-row scalar-issued Cast loops in K-slice staging; MTE2/V overlap.
 Exec facts: build MUST rm -rf csrc/build build_out (stale-cache trap); serving needs pip
 editable rebuild after .run install; correctness ref = torch WY, gate cos≥0.999.
+
+## Stage-cut ladder (measured, prod shape, steady us cumulative) 2026-08-20
+loads+bK+g 314 | +gram+Lambda 512 | +gate+T-build 590 (!T-build ~78us) |
++W-apply/store 2442 | FULL 4620.
+=> ~4030us (87%) in the two solve blocks; only fits the SCALAR fp32 fallback
+(2016 serial Axpys/RHS). Gate ||A||inf>=0.75 fires on essentially all data →
+every cube-path optimization was invisible. Fix shipped: threshold → 4.0
+(a5a25384a) + GM Lambda table (ef2c07ac4) + mmWs 8KB (c58108996); gated on
+full 9-shape battery (seed-7 data IS the adversarial case).
+npu-pipe-optimizer: hand YAML (wy_hand.yaml) parses; rolled-mode flag synth
+FAILS (9 unorderable hazards) — buffer aliasing from the UB diet blocks
+overlap; revisit post-gate-fix with 24KB freed.
