@@ -164,8 +164,10 @@ class WyCubeGemm {
                                           LocalTensor<half> bScratch, LocalTensor<float> floatScratch,
                                           uint32_t nDim, uint32_t rLda, bool useU)
   {
-    for (uint32_t n0 = 0; n0 < nDim; n0 += WY_CUBE_CHUNK) {
-      const uint32_t nCur = (nDim - n0) < WY_CUBE_CHUNK ? (nDim - n0) : WY_CUBE_CHUNK;
+    // DESLICE PROBE: one call per RHS at full width (the <=64 rule may be a
+    // stale-binary phantom; correctness+hang gated by the battery).
+    for (uint32_t n0 = 0; n0 < nDim; n0 += nDim) {
+      const uint32_t nCur = nDim;
       CastFloatRowsToHalfContiguous(bScratch, rUb[n0], WY_CUBE_CHUNK, nCur, rLda);
       WaitVToMte3();
       if (useU) {
