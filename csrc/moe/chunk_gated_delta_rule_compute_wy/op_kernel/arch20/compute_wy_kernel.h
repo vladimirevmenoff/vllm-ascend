@@ -467,9 +467,11 @@ class KernelComputeWy {
       SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
       LoadBthdChunkSlice(kGm_, halfLocal, b, tokenStart, kHeadIdx, kNumHead_, kHeadDim_, alignK_, k0, kCur);
       SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
-      for (uint32_t row = 0; row < FIXED_CHUNK_SIZE; ++row) {
-        Cast(scratch[row * FIXED_CHUNK_SIZE], halfLocal[row * alignK_ + k0], RoundMode::CAST_NONE, kCur);
-      }
+      // One strided Cast (dst rows lda=64 fp32, src rows lda=alignK half):
+      // replaces 64 scalar-issued per-row Casts — the biggest scalar-issue sink.
+      Cast(scratch, halfLocal[k0], RoundMode::CAST_NONE, static_cast<uint64_t>(kCur), FIXED_CHUNK_SIZE,
+           {1, 1, static_cast<uint8_t>(FIXED_CHUNK_SIZE * sizeof(float) / BLOCK_BYTES),
+            static_cast<uint8_t>(alignK_ * sizeof(half) / BLOCK_BYTES)});
       PipeBarrier<PIPE_V>();
       // attnLocal doubles as the Brcb workspace (needs 64*8 floats) while free.
       BroadcastMulRowsFloat(rhs[k0], scratch, betaLocal, attnLocal, FIXED_CHUNK_SIZE, kCur, alignK_,

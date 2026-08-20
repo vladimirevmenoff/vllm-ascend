@@ -102,7 +102,6 @@ class WyCubeGemm {
       CopyHalfRowsToGm(aGm_, aUb[k0], WY_CUBE_CHUNK, kCur, aLda);
       CopyHalfRowsToGm(bGm_, bUb[k0], WY_CUBE_CHUNK, kCur, bLda);
       WaitMte3ToMte2();
-      PipeBarrier<PIPE_ALL>();
 
       // Re-configuring shapes between IterateAll calls wedges the 310P matmul;
       // full 64-slices keep Init's 64^3 config untouched.
@@ -134,7 +133,6 @@ class WyCubeGemm {
     CopyHalfRowsToGm(aGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     WaitMte3ToMte2();
-    PipeBarrier<PIPE_ALL>();
 
     mmSquare_.SetTensorA(aGm_, false);
     mmSquare_.SetTensorB(bGm_, false);
@@ -168,7 +166,6 @@ class WyCubeGemm {
       WaitVToMte3();
       CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, nCur, nCur);
       WaitMte3ToMte2();
-      PipeBarrier<PIPE_ALL>();
 
       if (useU) {
         if (nCur != WY_CUBE_CHUNK) {
@@ -189,10 +186,10 @@ class WyCubeGemm {
       }
       PipeBarrier<PIPE_ALL>();
 
-      // Cube wrote C[64,nCur] to floatScratch; R[:, n0:n0+nCur] = C.
-      for (uint32_t row = 0; row < WY_CUBE_CHUNK; ++row) {
-        Adds(rUb[row * rLda + n0], floatScratch[row * nCur], 0.0f, nCur);
-      }
+      // Cube wrote C[64,nCur] to floatScratch; R[:, n0:n0+nCur] = C (one strided op).
+      Adds(rUb[n0], floatScratch, 0.0f, static_cast<uint64_t>(nCur), WY_CUBE_CHUNK,
+           {1, 1, static_cast<uint8_t>(rLda * sizeof(float) / 32),
+            static_cast<uint8_t>(nCur * sizeof(float) / 32)});
       PipeBarrier<PIPE_V>();
     }
   }
@@ -212,7 +209,6 @@ class WyCubeGemm {
       WaitVToMte3();
       CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, nCur, nCur);
       WaitMte3ToMte2();
-      PipeBarrier<PIPE_ALL>();
 
       if (useU) {
         if (nCur != WY_CUBE_CHUNK) {
@@ -237,9 +233,10 @@ class WyCubeGemm {
       if (rLda == nCur && n0 == 0) {
         Add(rUb, rUb, floatScratch, WY_CUBE_CHUNK * nCur);
       } else {
-        for (uint32_t row = 0; row < WY_CUBE_CHUNK; ++row) {
-          Add(rUb[row * rLda + n0], rUb[row * rLda + n0], floatScratch[row * nCur], nCur);
-        }
+        const BinaryRepeatParams arp{1, 1, 1, static_cast<uint8_t>(rLda * sizeof(float) / 32),
+                                     static_cast<uint8_t>(rLda * sizeof(float) / 32),
+                                     static_cast<uint8_t>(nCur * sizeof(float) / 32)};
+        Add(rUb[n0], rUb[n0], floatScratch, static_cast<uint64_t>(nCur), WY_CUBE_CHUNK, arp);
       }
       PipeBarrier<PIPE_V>();
     }
@@ -266,9 +263,10 @@ class WyCubeGemm {
     if (srcLda == cols) {
       Cast(dst, src, RoundMode::CAST_NONE, rows * cols);
     } else {
-      for (uint32_t row = 0; row < rows; ++row) {
-        Cast(dst[row * cols], src[row * srcLda], RoundMode::CAST_NONE, cols);
-      }
+      // One strided Cast per call instead of a per-row scalar-issued loop.
+      Cast(dst, src, RoundMode::CAST_NONE, static_cast<uint64_t>(cols), static_cast<uint8_t>(rows),
+           {1, 1, static_cast<uint8_t>(cols * sizeof(half) / 32),
+            static_cast<uint8_t>(srcLda * sizeof(float) / 32)});
     }
     PipeBarrier<PIPE_V>();
   }
