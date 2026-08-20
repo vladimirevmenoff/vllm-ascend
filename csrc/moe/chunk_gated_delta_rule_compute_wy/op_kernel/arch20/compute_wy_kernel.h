@@ -380,7 +380,7 @@ class KernelComputeWy {
   __aicore__ inline bool NeedsFp32ForwardSubstitution(const LocalTensor<float> a,
                                                       LocalTensor<float> absScratch,
                                                       LocalTensor<float> rowSums,
-                                                      LocalTensor<float> reduceScratch) const {
+                                                      LocalTensor<float> reduceScratch) {
     // A is strict-lower, so full-row sums equal the |lower-triangle| sums.
     // Fold columns in 6 strided vector Adds (was 64 serialized ReduceSums),
     // then two whole-tensor reductions; exactly TWO scalars cross to S.
