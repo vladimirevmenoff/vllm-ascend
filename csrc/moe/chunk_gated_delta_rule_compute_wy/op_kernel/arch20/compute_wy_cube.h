@@ -157,6 +157,22 @@ class WyCubeGemm {
     WaitMte3ToMte2();
   }
 
+  // Generic UB-fed matmul C[m,n] = A[m,k] @ B[k,n] on mmApplyU_ (shapes re-set
+  // per call and restored to 64^3). Caller provides half operands in UB and a
+  // fp32 C target in UB; caller owns pre-call V->MTE3 ordering.
+  __aicore__ inline void ApplyGeneric(LocalTensor<float> cUb, LocalTensor<half> aUb, LocalTensor<half> bUb,
+                                      uint32_t m, uint32_t n, uint32_t k)
+  {
+    mmApplyU_.SetOrgShape(static_cast<int>(m), static_cast<int>(n), static_cast<int>(k));
+    mmApplyU_.SetSingleShape(static_cast<int>(m), static_cast<int>(n), static_cast<int>(k));
+    mmApplyU_.SetTensorA(aUb, false);
+    mmApplyU_.SetTensorB(bUb, false);
+    mmApplyU_.IterateAll(cUb);
+    PipeBarrier<PIPE_ALL>();
+    mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+    mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+  }
+
   // R[:, n0:n0+nCur] = T @ R_slice per <=64-wide column slice; tUbHalf is the
   // resident half(T) in UB, bScratch receives the slice half-cast. REPLACES the
   // slice (T includes the identity) — one matmul per slice finishes the solve.

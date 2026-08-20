@@ -420,6 +420,71 @@ class KernelComputeWy {
     return (totSum != totSum) || (maxSum >= FP32_FS_ROW_SUM_THRESHOLD);
   }
 
+  // Exact in-place solve R = (I-A)^-1 R for ANY ||A|| (fp32 coefficients).
+  // Blocked forward substitution: rows in 4 blocks of 16. Off-diagonal updates
+  // R_b += A[b,<b] @ R_<b run on the cube against the already-solved prefix
+  // (fp16 operands, fp32 accumulate — same precision class as the RHS itself);
+  // only the 16x16 diagonal blocks stay on the serial scalar path, cutting the
+  // per-RHS scalar issues from 2016 to 480.
+  __aicore__ inline void Fp32ForwardSubstitution(const LocalTensor<float> a, LocalTensor<float> r, uint32_t dim,
+                                                 uint32_t lda, LocalTensor<half> aHalf, LocalTensor<half> bHalf,
+                                                 LocalTensor<float> cScratch) {
+    constexpr uint32_t BLK = 16;
+    SyncEvent<HardEvent::V_S>(HardEvent::V_S);
+    for (uint32_t b0 = 0; b0 < FIXED_CHUNK_SIZE; b0 += BLK) {
+      if (b0 > 0) {
+        // Cast the A block [16, b0] (lda 64) and the solved prefix rows [b0, dim]
+        // (lda) to half, then R_b += A_blk @ R_prefix on the cube.
+        Cast(aHalf, a[b0 * FIXED_CHUNK_SIZE], RoundMode::CAST_NONE, static_cast<uint64_t>(b0), BLK,
+             {1, 1, static_cast<uint8_t>(b0 * sizeof(half) / 32 == 0 ? 1 : b0 * sizeof(half) / 32),
+              static_cast<uint8_t>(FIXED_CHUNK_SIZE * sizeof(float) / 32)});
+        PipeBarrier<PIPE_V>();
+        CastFloatRowsToHalfSized(bHalf, r, b0, dim, lda);
+        SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
+        cubeGemm_.ApplyGeneric(cScratch, aHalf, bHalf, BLK, dim, b0);
+        // R_b += C
+        const BinaryRepeatParams arp{1, 1, 1, static_cast<uint8_t>(lda * sizeof(float) / 32),
+                                     static_cast<uint8_t>(lda * sizeof(float) / 32),
+                                     static_cast<uint8_t>(dim * sizeof(float) / 32)};
+        Add(r[b0 * lda], r[b0 * lda], cScratch, static_cast<uint64_t>(dim > 64 ? 64 : dim), BLK, arp);
+        if (dim > 64) {
+          Add(r[b0 * lda + 64], r[b0 * lda + 64], cScratch[64], static_cast<uint64_t>(dim - 64), BLK, arp);
+        }
+        PipeBarrier<PIPE_V>();
+        SyncEvent<HardEvent::V_S>(HardEvent::V_S);
+      }
+      for (uint32_t row = b0 + 1; row < b0 + BLK; ++row) {
+        const uint32_t aRowOffset = row * FIXED_CHUNK_SIZE;
+        const uint32_t rRowOffset = row * lda;
+        for (uint32_t col = b0; col < row; ++col) {
+          const float coefficient = a.GetValue(aRowOffset + col);
+          Axpy(r[rRowOffset], r[col * lda], coefficient, static_cast<int32_t>(dim));
+          PipeBarrier<PIPE_V>();
+        }
+      }
+      SyncEvent<HardEvent::V_S>(HardEvent::V_S);
+    }
+  }
+
+  // Rows-limited compact cast: dst[rows, cols] (lda cols) <- src[rows, srcLda].
+  __aicore__ inline void CastFloatRowsToHalfSized(LocalTensor<half> dst, const LocalTensor<float> src, uint32_t rows,
+                                                  uint32_t cols, uint32_t srcLda) {
+    if (srcLda == cols) {
+      Cast(dst, src, RoundMode::CAST_NONE, rows * cols);
+    } else {
+      Cast(dst, src, RoundMode::CAST_NONE, static_cast<uint64_t>(cols > 64 ? 64 : cols), static_cast<uint8_t>(rows),
+           {1, 1, static_cast<uint8_t>(cols * sizeof(half) / 32),
+            static_cast<uint8_t>(srcLda * sizeof(float) / 32)});
+      if (cols > 64) {
+        Cast(dst[64], src[64], RoundMode::CAST_NONE, static_cast<uint64_t>(cols - 64), static_cast<uint8_t>(rows),
+             {1, 1, static_cast<uint8_t>(cols * sizeof(half) / 32),
+              static_cast<uint8_t>(srcLda * sizeof(float) / 32)});
+      }
+    }
+    PipeBarrier<PIPE_V>();
+  }
+
+
   // Stable in-place solve R = (I-A)^-1 R for a single RHS block. Processing rows
   // top to bottom means each source row has already been solved, exactly matching
   // the torch WY forward substitution. A and R stay fp32 until the output cast.
@@ -538,7 +603,7 @@ class KernelComputeWy {
 
     // ---- W = T @ (γβK), resident in rhs. halfLocal stages R halves. ----
     if (useFp32ForwardSubstitution) {
-      Fp32ForwardSubstitution(attnLocal, rhs, kHeadDim_, alignK_);
+      Fp32ForwardSubstitution(attnLocal, rhs, kHeadDim_, alignK_, qHalf, halfLocal, scratch);
     } else {
       cubeGemm_.GemmApplyReplace(rhs, qHalf[ATTEN_ELEMS], halfLocal, scratch, kHeadDim_, alignK_, /*useU=*/false);
     }
@@ -555,7 +620,7 @@ class KernelComputeWy {
     PipeBarrier<PIPE_V>();
     BroadcastMulRowsFloat(rhs, rhs, betaLocal, scratch, FIXED_CHUNK_SIZE, vHeadDim_, alignV_, alignV_);
     if (useFp32ForwardSubstitution) {
-      Fp32ForwardSubstitution(attnLocal, rhs, vHeadDim_, alignV_);
+      Fp32ForwardSubstitution(attnLocal, rhs, vHeadDim_, alignV_, qHalf, halfLocal, scratch);
     } else {
       cubeGemm_.GemmApplyReplace(rhs, qHalf[ATTEN_ELEMS], halfLocal, scratch, vHeadDim_, alignV_, /*useU=*/true);
     }
