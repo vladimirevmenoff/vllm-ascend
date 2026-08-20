@@ -430,16 +430,17 @@ class KernelComputeWy {
     }
     SyncEvent<HardEvent::S_V>(HardEvent::S_V);
     for (uint32_t round = 0; round < DOUBLING_ROUNDS; ++round) {
-      cubeGemm_.UploadP(attnLocal, pHalf);
-      cubeGemm_.GemmApplyAdd(tOut, tHalf, cScratch, FIXED_CHUNK_SIZE, FIXED_CHUNK_SIZE, /*useU=*/true);
+      Cast(pHalf, attnLocal, RoundMode::CAST_NONE, ATTEN_ELEMS);
+      PipeBarrier<PIPE_V>();
+      cubeGemm_.GemmApplyAdd(tOut, pHalf, tHalf, cScratch);
       if (round + 1 < DOUBLING_ROUNDS) {
         cubeGemm_.GemmSquare(attnLocal, pHalf);
         SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
       }
     }
-    // Stage half(T) on aGm_ once; both RHS applies (and all their column slices)
-    // consume it from there.
-    cubeGemm_.UploadP(tOut, pHalf);
+    // Keep half(T) resident in UB (tHalf); both RHS applies read it directly.
+    Cast(tHalf, tOut, RoundMode::CAST_NONE, ATTEN_ELEMS);
+    PipeBarrier<PIPE_V>();
   }
 
   __aicore__ inline void ProcessOneTask(uint32_t b, uint32_t kHeadIdx, uint32_t vHeadIdx, uint32_t chunkIdx) {
@@ -511,7 +512,7 @@ class KernelComputeWy {
     if (useFp32ForwardSubstitution) {
       Fp32ForwardSubstitution(attnLocal, rhs, kHeadDim_, alignK_);
     } else {
-      cubeGemm_.GemmApplyReplace(rhs, halfLocal, cScratch, kHeadDim_, alignK_, /*useU=*/false);
+      cubeGemm_.GemmApplyReplace(rhs, qHalf[ATTEN_ELEMS], halfLocal, scratch, kHeadDim_, alignK_, /*useU=*/false);
     }
     Cast(halfLocal, rhs, RoundMode::CAST_NONE, chunkKElems_);
     SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
@@ -527,7 +528,7 @@ class KernelComputeWy {
     if (useFp32ForwardSubstitution) {
       Fp32ForwardSubstitution(attnLocal, rhs, vHeadDim_, alignV_);
     } else {
-      cubeGemm_.GemmApplyReplace(rhs, halfLocal, cScratch, vHeadDim_, alignV_, /*useU=*/true);
+      cubeGemm_.GemmApplyReplace(rhs, qHalf[ATTEN_ELEMS], halfLocal, scratch, vHeadDim_, alignV_, /*useU=*/true);
     }
     Cast(halfLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
     SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
