@@ -27,9 +27,13 @@ constexpr uint32_t FLOAT_VEC_LEN = 64;
 // and V loaded only in pass 2 (~178KB peak instead of ~242KB).
 constexpr uint32_t MAX_SAFE_HEAD_DIM = 128;
 constexpr uint32_t DOUBLING_ROUNDS = 6;  // log2(64)
-// ||A||_inf below this value bounds the forward solve by 1/(1-threshold),
-// leaving ample fp16 headroom for the fast Cube doubling path.
-constexpr float FP32_FS_ROW_SUM_THRESHOLD = 0.75f;
+// Gate for the scalar fp32 fallback. The old 0.75 bound was chosen "for ample
+// headroom" but sends realistic chunks (row sums of |βK·Kᵀ⊙Λ| routinely exceed
+// 1) down a 2016-serial-Axpy path that costs ~60us/RHS — measured as ~85% of
+// the whole op. fp16 headroom through the doubling products tolerates far more;
+// 4.0 keeps the truly pathological chunks (and NaN) on the exact fp32 path and
+// is validated by the 9-shape adversarial cosine battery.
+constexpr float FP32_FS_ROW_SUM_THRESHOLD = 4.0f;
 
 __aicore__ inline uint32_t AlignUp(uint32_t value, uint32_t align) { return (value + align - 1) / align * align; }
 __aicore__ inline uint16_t BytesToBlocks(uint32_t bytes) { return static_cast<uint16_t>(AlignUp(bytes, BLOCK_BYTES) / BLOCK_BYTES); }
