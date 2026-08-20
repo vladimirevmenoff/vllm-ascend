@@ -429,7 +429,7 @@ class KernelComputeWy {
   __aicore__ inline void Fp32ForwardSubstitution(const LocalTensor<float> a, LocalTensor<float> r, uint32_t dim,
                                                  uint32_t lda, LocalTensor<half> aHalf, LocalTensor<half> bHalf,
                                                  LocalTensor<float> cScratch) {
-    constexpr uint32_t BLK = 16;
+    constexpr uint32_t BLK = 8;
     SyncEvent<HardEvent::V_S>(HardEvent::V_S);
     for (uint32_t b0 = 0; b0 < FIXED_CHUNK_SIZE; b0 += BLK) {
       if (b0 > 0) {

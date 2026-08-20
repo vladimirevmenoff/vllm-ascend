@@ -35,3 +35,8 @@ overhead/call. NOTE: the "any 128-dim cube call hangs" lore (drove all <=64 slic
 gram single K=128 call + applies nDim=128 single call. If clean: calls/task halve.
 Then: async Iterate pairing (square || apply), early-exit rounds when P underflows
 (production Λ-decay win), npu-pipe overlap w/ un-aliased buffers.
+
+## BLOCKED SUBSTITUTION LANDS (2026-08-20 ~20:30): canonical 4691→1979us (2.37x), cos=1.0 x9
+4c9590a84: exact fp32 solve, 16-row blocks, off-diag on cube vs solved prefix.
+All shapes ~halved (1,256: 598; 1,192: 822; 1,512: 376; min-shape 210).
+Remaining to 3x (<=1560): 1.27x. Next: BLK 8 probe → async pairing → overlap.
