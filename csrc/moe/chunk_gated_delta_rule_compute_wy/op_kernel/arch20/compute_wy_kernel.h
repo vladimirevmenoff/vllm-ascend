@@ -98,23 +98,25 @@ class KernelComputeWy {
       maxAlign = FIXED_CHUNK_SIZE;
     }
     maxAlign_ = maxAlign;
-    // Two-pass UB layout (fits K=V=128 in 192KB):
-    //  - qHalfBuf_: βK gram operand + P-upload scratch + Q/K passthrough staging.
-    //  - halfBuf_:  K gram operand (pass 1) and the R-half staging for whichever
-    //    RHS is being solved; W and U are never live simultaneously.
-    //  - tmpBuf_:   K fp32 while building Kβ, then gram acc / Λ mat / apply-C scratch.
-    //  - rhsBuf_:   the single resident fp32 RHS (γβK in pass 1, βV in pass 2).
-    //  - A snapshot for pass 2 lives in the per-core GM slot (cubeGemm_.SaveSnap).
-    pipe_->InitBuffer(qHalfBuf_, FIXED_CHUNK_SIZE * maxAlign * sizeof(half));
+    // Explicit-T UB layout (fits K=V=128 in 192KB):
+    //  - qHalfBuf_: βK gram operand + P/T upload staging (two 8KB half regions:
+    //    [0:4096) P-halves, [4096:8192) T's B-operand halves) + Q/K passthrough.
+    //    Sized >= 8192 halves even at head dim 64 for the second region.
+    //  - halfBuf_:  K gram operand, R-half staging, and (reinterpreted as float)
+    //    the 64x64 C scratch for the T-build applies.
+    //  - tmpBuf_:   K fp32 slices, gram acc, Λ mat, then T fp32 during the solve.
+    //  - rhsBuf_:   the single resident fp32 RHS (γβK for W, then βV for U).
+    const uint32_t qHalfElems = FIXED_CHUNK_SIZE * (maxAlign < 2 * FIXED_CHUNK_SIZE ? 2 * FIXED_CHUNK_SIZE : maxAlign);
+    pipe_->InitBuffer(qHalfBuf_, qHalfElems * sizeof(half));
     pipe_->InitBuffer(halfBuf_, FIXED_CHUNK_SIZE * maxAlign * sizeof(half));
     pipe_->InitBuffer(rhsBuf_, FIXED_CHUNK_SIZE * maxAlign * sizeof(float));
     pipe_->InitBuffer(attnBuf_, ATTEN_ELEMS * sizeof(float));
     // +8 floats: slot FIXED_CHUNK_SIZE holds the Lambda mask sentinel (see BuildLambdaTable).
     pipe_->InitBuffer(gBuf_, (FIXED_CHUNK_SIZE + 8) * sizeof(float));
     pipe_->InitBuffer(expGBuf_, FIXED_CHUNK_SIZE * sizeof(float));
-    // 64x64 fp32 scratch: per-slice K staging, gram acc, Lambda mat, apply C.
+    // 64x64 fp32 scratch: per-slice K staging, gram acc, Lambda mat, then T.
     // (Keeping it 64-wide is what lets K=V=128 fit in UB next to the matmul
-    // library's own allocations; A parks in GM between the two solve passes.)
+    // library's own allocations.)
     pipe_->InitBuffer(tmpBuf_, ATTEN_ELEMS * sizeof(float));
     pipe_->InitBuffer(rowBuf_, FIXED_CHUNK_SIZE * sizeof(float));
     pipe_->InitBuffer(negABuf_, FIXED_CHUNK_SIZE * sizeof(float));
@@ -411,25 +413,33 @@ class KernelComputeWy {
     }
   }
 
-  // Applies (I−A)⁻¹ in place to one RHS block, choosing the scalar or doubling path.
-  // Doubling mutates attnLocal (squarings); the caller restores it between passes.
-  __aicore__ inline void SolveOneRhs(bool useFp32, LocalTensor<float> attnLocal, LocalTensor<float> rhs,
-                                     LocalTensor<half> rHalf, LocalTensor<half> pHalf, LocalTensor<float> scratch,
-                                     uint32_t dim, uint32_t lda, bool useU) {
-    if (useFp32) {
-      Fp32ForwardSubstitution(attnLocal, rhs, dim, lda);
-      return;
+  // Materialises T = (I−A)⁻¹ = Π(I + A^{2^k}) once via doubling ON T:
+  //   T ← I; per round: T ← T + P·T, P ← P². All 64×64, all fp32-accumulated.
+  // Afterwards each RHS solve is ONE matmul per 64-wide slice (GemmApplyReplace),
+  // instead of re-running the whole chain per RHS as the two-pass solve did.
+  // Layout (no new buffers): T fp32 lives in tOut (tmpBuf); the C scratch for the
+  // T-build applies is halfLocal reinterpreted as float (K half is dead by now);
+  // qHalf[0:4096] stages P uploads, qHalf[4096:8192] stages T's B-operand halves.
+  __aicore__ inline void BuildT(LocalTensor<float> attnLocal, LocalTensor<float> tOut,
+                                LocalTensor<float> cScratch, LocalTensor<half> pHalf, LocalTensor<half> tHalf) {
+    Duplicate(tOut, 0.0f, ATTEN_ELEMS);
+    PipeBarrier<PIPE_V>();
+    SyncEvent<HardEvent::V_S>(HardEvent::V_S);
+    for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
+      tOut.SetValue(i * FIXED_CHUNK_SIZE + i, 1.0f);
     }
-    // Fast nilpotent doubling: R ← (I−A)⁻¹ R without forming T. pHalf (qHalf)
-    // stages P uploads; rHalf stages the RHS — they must not alias.
+    SyncEvent<HardEvent::S_V>(HardEvent::S_V);
     for (uint32_t round = 0; round < DOUBLING_ROUNDS; ++round) {
       cubeGemm_.UploadP(attnLocal, pHalf);
-      cubeGemm_.GemmApplyAdd(rhs, rHalf, scratch, dim, lda, useU);
+      cubeGemm_.GemmApplyAdd(tOut, tHalf, cScratch, FIXED_CHUNK_SIZE, FIXED_CHUNK_SIZE, /*useU=*/true);
       if (round + 1 < DOUBLING_ROUNDS) {
         cubeGemm_.GemmSquare(attnLocal, pHalf);
         SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
       }
     }
+    // Stage half(T) on aGm_ once; both RHS applies (and all their column slices)
+    // consume it from there.
+    cubeGemm_.UploadP(tOut, pHalf);
   }
 
   __aicore__ inline void ProcessOneTask(uint32_t b, uint32_t kHeadIdx, uint32_t vHeadIdx, uint32_t chunkIdx) {
@@ -487,27 +497,36 @@ class KernelComputeWy {
     // betaLocal must survive for the pass-2 βV product.
     const bool useFp32ForwardSubstitution =
         NeedsFp32ForwardSubstitution(attnLocal, scratch, expGLocal, reduceScratch);
-    // Snapshot A to the per-core GM slot: the doubling squarings below consume
-    // it, and pass 2 must restart from P₀. (Unconditional; also fp32 path.)
-    cubeGemm_.SaveSnap(attnLocal);
+    // ---- Build T = (I−A)⁻¹ once (skipped on the fp32 fallback path, which
+    // consumes A directly). tmpBuf holds T fp32; halfLocal (K half, dead after
+    // the gram) is the reinterpreted C scratch; qHalf hosts both half stagings.
+    LocalTensor<float> cScratch = halfLocal.template ReinterpretCast<float>();
+    if (!useFp32ForwardSubstitution) {
+      BuildT(attnLocal, scratch, cScratch, qHalf, qHalf[ATTEN_ELEMS]);
+    }
 
-    // ---- Pass 1: W = (I−A)⁻¹ (γβK), resident in rhs. halfLocal stages R halves. ----
-    SolveOneRhs(useFp32ForwardSubstitution, attnLocal, rhs, halfLocal, qHalf, scratch, kHeadDim_, alignK_,
-                /*useU=*/false);
+    // ---- W = T @ (γβK), resident in rhs. halfLocal stages R halves. ----
+    if (useFp32ForwardSubstitution) {
+      Fp32ForwardSubstitution(attnLocal, rhs, kHeadDim_, alignK_);
+    } else {
+      cubeGemm_.GemmApplyReplace(rhs, halfLocal, cScratch, kHeadDim_, alignK_, /*useU=*/false);
+    }
     Cast(halfLocal, rhs, RoundMode::CAST_NONE, chunkKElems_);
     SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     StoreBhtdChunk(wKernelGm_, halfLocal, b, vHeadIdx, tokenStart, vNumHead_, kHeadDim_, alignK_);
     SyncEvent<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
 
-    // ---- Pass 2: load V now, U = (I−A)⁻¹ (βV). ----
-    cubeGemm_.LoadSnap(attnLocal);
+    // ---- U = T @ (βV): load V only now. ----
     LoadBthdChunk(vGm_, halfLocal, b, tokenStart, vHeadIdx, vNumHead_, vHeadDim_, alignV_);
     SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
     Cast(rhs, halfLocal, RoundMode::CAST_NONE, chunkVElems_);
     PipeBarrier<PIPE_V>();
     BroadcastMulRowsFloat(rhs, rhs, betaLocal, scratch, FIXED_CHUNK_SIZE, vHeadDim_, alignV_, alignV_);
-    SolveOneRhs(useFp32ForwardSubstitution, attnLocal, rhs, halfLocal, qHalf, scratch, vHeadDim_, alignV_,
-                /*useU=*/true);
+    if (useFp32ForwardSubstitution) {
+      Fp32ForwardSubstitution(attnLocal, rhs, vHeadDim_, alignV_);
+    } else {
+      cubeGemm_.GemmApplyReplace(rhs, halfLocal, cScratch, vHeadDim_, alignV_, /*useU=*/true);
+    }
     Cast(halfLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
     SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     StoreBhtdChunk(uKernelGm_, halfLocal, b, vHeadIdx, tokenStart, vNumHead_, vHeadDim_, alignV_);

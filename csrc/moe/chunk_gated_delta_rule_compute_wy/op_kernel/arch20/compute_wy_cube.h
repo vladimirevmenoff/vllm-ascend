@@ -155,25 +155,46 @@ class WyCubeGemm {
     WaitMte3ToMte2();
   }
 
-  // Park/restore the fp32 A block in the per-core GM snapshot slot.
-  __aicore__ inline void SaveSnap(const LocalTensor<float> pUb)
+  // R[:, n0:n0+nCur] = T @ R_slice for every <=64-wide column slice, where the
+  // half-cast T[64,64] is ALREADY staged on aGm_ (via UploadP). Unlike
+  // GemmApplyAdd this REPLACES the slice (T includes the identity), so one
+  // matmul per slice finishes the solve. floatScratch >= 64*64 floats.
+  __aicore__ inline void GemmApplyReplace(LocalTensor<float> rUb, LocalTensor<half> halfScratch,
+                                          LocalTensor<float> floatScratch, uint32_t nDim, uint32_t rLda, bool useU)
   {
-    WaitVToMte3();
-    DataCopyParams params{1, static_cast<uint16_t>((WY_CUBE_CHUNK * WY_CUBE_CHUNK * sizeof(float)) / 32), 0, 0};
-    DataCopy(snapGm_, pUb, params);
-    WaitMte3ToMte2();
-  }
-  __aicore__ inline void LoadSnap(LocalTensor<float> pUb)
-  {
-    // pUb (A) was last read/written by V or Cube; order that before the MTE2 write.
-    event_t evtV = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE2));
-    SetFlag<HardEvent::V_MTE2>(evtV);
-    WaitFlag<HardEvent::V_MTE2>(evtV);
-    DataCopyParams params{1, static_cast<uint16_t>((WY_CUBE_CHUNK * WY_CUBE_CHUNK * sizeof(float)) / 32), 0, 0};
-    DataCopy(pUb, snapGm_, params);
-    event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::MTE2_V));
-    SetFlag<HardEvent::MTE2_V>(evt);
-    WaitFlag<HardEvent::MTE2_V>(evt);
+    for (uint32_t n0 = 0; n0 < nDim; n0 += WY_CUBE_CHUNK) {
+      const uint32_t nCur = (nDim - n0) < WY_CUBE_CHUNK ? (nDim - n0) : WY_CUBE_CHUNK;
+      CastFloatRowsToHalfContiguous(halfScratch, rUb[n0], WY_CUBE_CHUNK, nCur, rLda);
+      WaitVToMte3();
+      CopyHalfRowsToGm(bGm_, halfScratch, WY_CUBE_CHUNK, nCur, nCur);
+      WaitMte3ToMte2();
+      PipeBarrier<PIPE_ALL>();
+
+      if (useU) {
+        if (nCur != WY_CUBE_CHUNK) {
+          mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+          mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        }
+        mmApplyU_.SetTensorA(aGm_, false);
+        mmApplyU_.SetTensorB(bGm_, false);
+        mmApplyU_.IterateAll(floatScratch);
+      } else {
+        if (nCur != WY_CUBE_CHUNK) {
+          mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+          mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        }
+        mmApplyW_.SetTensorA(aGm_, false);
+        mmApplyW_.SetTensorB(bGm_, false);
+        mmApplyW_.IterateAll(floatScratch);
+      }
+      PipeBarrier<PIPE_ALL>();
+
+      // Cube wrote C[64,nCur] to floatScratch; R[:, n0:n0+nCur] = C.
+      for (uint32_t row = 0; row < WY_CUBE_CHUNK; ++row) {
+        Adds(rUb[row * rLda + n0], floatScratch[row * nCur], 0.0f, nCur);
+      }
+      PipeBarrier<PIPE_V>();
+    }
   }
 
   // R = R + P @ R for one RHS block (U or W). Assumes P already on aGm_ (UploadP).
