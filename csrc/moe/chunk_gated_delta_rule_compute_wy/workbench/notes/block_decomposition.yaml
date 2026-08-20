@@ -1,0 +1,38 @@
+# block_decomposition.yaml — HAND-AUTHORED (improve mode B1 audit, 2026-08-20)
+# Auto-extractor: 10 signatures, 0 matches — kernel is bespoke, not block-composed.
+# Stages cite op_kernel/arch20/compute_wy_kernel.h (tip e888432a6) ProcessOneTask.
+op_name: chunk_gated_delta_rule_compute_wy
+target: Ascend310P3
+mode: improve
+task_grid: "B x Hv x numChunks tasks round-robin over usedCoreNum AIC cores (Process, ~l.166)"
+blocks:
+  - id: stage1_kbeta_slices
+    nearest_block_class: dma-load-strided + vector-rowscale
+    what: "per-64-slice K load (LoadBthdChunkSlice) -> per-row scalar-issued Cast half->fp32 (64 Cast calls/slice) -> Brcb+Mul rowscale beta*K into rhs (split-lda BroadcastMulRowsFloat)"
+    pipes: [MTE2, V, S]
+    known_issue: "64 scalar-issued Cast per slice (128 at K=128) — issue-bound; candidates: strided-batch Cast via repeat params, or fold cast into rowscale"
+  - id: cumulative_g
+    nearest_block_class: gather-column + scalar-cumsum
+    what: "BuildCumulativeG: gather g column via gOff table, 64-step scalar cumsum, Exp, DataCopy to gKernel GM"
+    pipes: [MTE2, V, S, MTE3]
+    known_issue: "scalar cumsum serializes; small (64 elems)"
+  - id: gram_lambda
+    nearest_block_class: cube-gram-accumulate + vector-mask
+    what: "GemmATransB per-64-K-slice restaged to GM, UB Add accumulate; Muls(-1); Lambda via lamOff Gather+Sub+Exp+Mul (ApplyLambdaNegStrictLower)"
+    pipes: [MTE3, MTE2, CUBE, V]
+    known_issue: "per-slice GM restage round-trip; PIPE_ALL barriers per matmul call"
+  - id: solve_two_pass
+    nearest_block_class: cube-doubling-solve
+    what: "SolveOneRhs x2 (W then U): 6 rounds UploadP + GemmApplyAdd(<=64-wide col slices) + GemmSquare; A parked in GM snapshot (SaveSnap/LoadSnap) between passes; fp32 scalar fallback gated by NeedsFp32ForwardSubstitution"
+    pipes: [V, MTE3, MTE2, CUBE, S]
+    known_issue: "TOP CANDIDATE: doubling chain runs TWICE (P-squaring cube work + uploads duplicated). Single chain applying both RHS per round needs both RHS resident (UB) or GM round-trip of one RHS per round. Also PIPE_ALL per cube call serializes pipes"
+  - id: store_outputs
+    nearest_block_class: dma-store-strided
+    what: "Cast rhs->half + StoreBhtdChunk W then U; StoreQKKernel q/k passthrough (1 per head group)"
+    pipes: [V, MTE3, MTE2]
+    known_issue: "passthrough copies q/k through UB — could overlap with solve"
+ub_budget_bytes: 149216   # ws32K qHalf16K half16K rhs32K attn16K tmp16K lamOff16K misc~1.7K @K=V=128
+baseline:
+  msprof_old_profile: "task 1043-5767us, scalar util 0.73, cube 0.02 (talk/pr11941_perf_profile.md — PRE-two-pass, stale)"
+  serving_ttft_ms: 1466.7
+  correctness: "cos=1.000000 W/U/g at K128/K64/K128V64 vs torch WY (2026-08-20)"

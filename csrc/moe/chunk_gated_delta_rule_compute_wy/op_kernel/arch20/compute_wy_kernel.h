@@ -10,6 +10,7 @@
 #include "../chunk_gated_delta_rule_compute_wy_tiling_data.h"
 
 #include "compute_wy_cube.h"
+#include "compute_wy_lambda_table.h"
 
 namespace ChunkGatedDeltaRuleComputeWy {
 
@@ -135,14 +136,12 @@ class KernelComputeWy {
   // large negative sentinel, so Exp() drives those lanes to 0. This folds the triangular
   // mask into the gather and costs no extra vector op per task.
   __aicore__ inline void BuildLambdaTable() {
-    LocalTensor<uint32_t> off = lamOffBuf_.Get<uint32_t>();
-    for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
-      const uint32_t rowByte = i * static_cast<uint32_t>(sizeof(float));
-      for (uint32_t j = 0; j < FIXED_CHUNK_SIZE; ++j) {
-        off.SetValue(i * FIXED_CHUNK_SIZE + j,
-                     (j < i) ? rowByte : FIXED_CHUNK_SIZE * static_cast<uint32_t>(sizeof(float)));
-      }
-    }
+    // Table is compile-time GM constant data; one 16KB MTE2 burst replaces the
+    // 4096-iteration scalar SetValue loop every core paid on every launch.
+    GlobalTensor<uint32_t> tabGm;
+    tabGm.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t*>(const_cast<__gm__ uint32_t*>(WY_LAMBDA_OFF_TABLE)));
+    DataCopy(lamOffBuf_.Get<uint32_t>(), tabGm, ATTEN_ELEMS);
+    SyncEvent<HardEvent::MTE2_S>(HardEvent::MTE2_S);
     gBuf_.Get<float>().SetValue(FIXED_CHUNK_SIZE, -1.0e20f);
   }
 

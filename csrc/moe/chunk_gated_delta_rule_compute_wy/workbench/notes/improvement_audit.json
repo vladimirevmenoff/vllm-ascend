@@ -1,0 +1,30 @@
+{
+ "op": "chunk_gated_delta_rule_compute_wy",
+ "baseline_us": 4691,
+ "findings": [
+  {
+   "id": "F1-explicit-T",
+   "predicted_speedup": 0.27,
+   "risk": "low",
+   "transform": "solve: build T once, 2 applies; delete two-pass+snapshot"
+  },
+  {
+   "id": "F2-strided-cast",
+   "predicted_speedup": 0.065,
+   "risk": "low",
+   "transform": "stage1: 1 strided Cast per slice"
+  },
+  {
+   "id": "F3-precise-events",
+   "predicted_speedup": 0.075,
+   "risk": "medium",
+   "transform": "PIPE_ALL\u2192precise events + next-task prefetch"
+  },
+  {
+   "id": "F4-overlap-passthrough",
+   "predicted_speedup": 0.025,
+   "risk": "low",
+   "transform": "interleave StoreQKKernel with solve"
+  }
+ ]
+}

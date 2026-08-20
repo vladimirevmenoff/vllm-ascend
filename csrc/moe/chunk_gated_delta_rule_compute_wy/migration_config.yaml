@@ -1,0 +1,77 @@
+# Authored by ascend310p-config-wizard 2026-08-20 — improve mode,
+# chunk_gated_delta_rule_compute_wy, npu-pipe-optimizer enabled (Mode A checks).
+toolkit:
+  cann_path: ".claude/cann-mirror/"   # local mirror (real .ini fetched from container claude_13122); real CANN is remote
+  cann_version: "9.1.0-beta.1"
+  customize_env: ""
+  cc: "gcc"
+  cxx: "g++"
+
+execution:
+  # All compile/profile runs execute in the remote container (local box has no CANN).
+  prelude: "ssh -o BatchMode=yes 310p-a docker exec claude_13122 bash -lc"
+  build_command: "cd /vllm-workspace/vllm-ascend-combined/csrc && rm -rf build build_out && bash build.sh --pkg --soc=ascend310p --ops=chunk_gated_delta_rule_compute_wy && cd build && ./cann-ops-transformer-custom_linux-aarch64.run --quiet --install-for-all && rm -rf /root/atc_data"
+  build_cwd: "/vllm-workspace/vllm-ascend-combined/csrc"
+  build_output_dir: "/vllm-workspace/vllm-ascend-combined/csrc/build"
+  incremental_build_command: ""   # cmake cache serves STALE kernel .o — never build incrementally (see notes)
+  test_runner: "ASCEND_RT_VISIBLE_DEVICES=6 python /work/test_bisect.py"
+  msprof_simulator_command: "msprof op simulator"
+  msprof_device_command: "msprof op"
+  command_timeout_sec: 900
+
+target:
+  soc_version: "Ascend310P3"
+  short_soc: "ascend310p"
+  also_register_kirin: false
+
+source_operator:
+  path: "csrc/moe/chunk_gated_delta_rule_compute_wy"
+  name: "chunk_gated_delta_rule_compute_wy"
+  source_chip: "ascend310p"
+
+workspace:
+  path: "csrc/moe/chunk_gated_delta_rule_compute_wy"
+  workbench_subdir: "workbench"
+  in_place: true
+
+device:
+  available: true
+  ssh_host: "310p-a"          # ~/.ssh/config alias; commands wrapped in: docker exec claude_13122
+  remote_cann_path: "/usr/local/Ascend/ascend-toolkit/latest/"
+  remote_project_path: "/vllm-workspace/vllm-ascend-combined/"
+  arch: "aarch64"
+  visible_devices: "6"
+  prelude: "docker exec claude_13122 bash -lc"
+  build_command: "cd /vllm-workspace/vllm-ascend-combined/csrc && rm -rf build build_out && bash build.sh --pkg --soc=ascend310p --ops=chunk_gated_delta_rule_compute_wy"
+  build_output_dir: "/vllm-workspace/vllm-ascend-combined/csrc/build"
+  install_command: "cd /vllm-workspace/vllm-ascend-combined/csrc/build && ./cann-ops-transformer-custom_linux-aarch64.run --quiet --install-for-all && rm -rf /root/atc_data"
+  cmakepresets_sed_patch_required: false
+  rsync_excludes: ["build/", "build_out/", "__pycache__/", "*.pyc", ".git/", "talk/", "npu-pipe-optimizer/"]
+  notes: >
+    Shared box: pin ASCEND_RT_VISIBLE_DEVICES after npu-smi check. ssh drops every
+    few minutes — docker exec -d for long jobs, retry loops on every call.
+    CRITICAL: after install, serving needs full pip editable rebuild to regenerate
+    the tree vendor (_cann_ops_custom); targeted .run replaces CANN vendor with a
+    single-op package (breaks serving until pip rebuild). Correctness gate:
+    /work/test_bisect.py (TK/TV env) vs torch WY ref, cos>=0.999 on w/u/g at
+    K=V=128, K=V=64, K=128/V=64.
+
+references: {}
+
+tools:
+  npu_pipe_optimizer:
+    available: true
+    path: "npu-pipe-optimizer/"
+    python_module: "npu_pipe_optimizer"
+  ascendc_to_yaml_parser:
+    available: false
+    path: ""
+
+options:
+  improve_existing: true
+  hooks_enabled: true
+  auto_promote_benchmarks: true
+  stop_condition: "tier2_device"
+  test_shape_coverage: "light"
+  recipe_min_speedup: 0.05
+  determinism_runs: 3
