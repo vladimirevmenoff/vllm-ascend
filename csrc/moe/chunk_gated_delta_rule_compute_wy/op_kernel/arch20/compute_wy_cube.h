@@ -26,10 +26,7 @@ using WyMatmulBTrans = matmul::MatmulImpl<WyMmAType, WyMmBTransType, WyMmCType, 
 using WyMmAUbType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, false>;
 using WyMmBUbType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, false>;
 using WyMatmulApplyUb = matmul::MatmulImpl<WyMmAUbType, WyMmBUbType, WyMmCType, WyMmBiasType>;
-// (half-C to UB wedges the 310P cube — aicore timeout — but half-C to GM is
-// the standard inference path and is used for the solve outputs below.)
-using WyMmCGmHalfType = MatmulType<TPosition::GM, CubeFormat::ND, half>;
-using WyMatmulApplyGmC = matmul::MatmulImpl<WyMmAUbType, WyMmBUbType, WyMmCGmHalfType, WyMmBiasType>;
+// (half-C UB output wedges the 310P cube — aicore timeout; keep C fp32)
 
 // GM staging: A_half(64*MAX_HEAD) + B_half(64*MAX_HEAD). Cube writes C directly to UB.
 // Doubling applies U/W separately so N <= MAX_HEAD (no stacked 2N-wide staging).
@@ -49,8 +46,7 @@ constexpr uint32_t WY_CUBE_SNAP_OFF = WY_CUBE_STAGING_A_BYTES + WY_CUBE_STAGING_
 class WyCubeGemm {
  public:
   __aicore__ inline void Init(const TCubeTiling *attnTiling, const TCubeTiling *squareTiling,
-                              const TCubeTiling *applyUTiling, const TCubeTiling *applyWTiling,
-                              const TCubeTiling *applyGTiling, TPipe *pipe,
+                              const TCubeTiling *applyUTiling, const TCubeTiling *applyWTiling, TPipe *pipe,
                               LocalTensor<uint8_t> localWs, uint32_t localWsBytes, GM_ADDR workspace,
                               uint64_t workspaceOffset, uint32_t perCoreBytes, uint32_t usedCoreNum,
                               uint32_t kHeadDim, uint32_t vHeadDim)
@@ -67,8 +63,6 @@ class WyCubeGemm {
     mmApplyU_.Init(applyUTiling, pipe_);
     mmApplyW_.SetSubBlockIdx(0);
     mmApplyW_.Init(applyWTiling, pipe_);
-    mmApplyG_.SetSubBlockIdx(0);
-    mmApplyG_.Init(applyGTiling, pipe_);
 
 
     localWs_ = localWs;
@@ -91,9 +85,6 @@ class WyCubeGemm {
     mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmApplyW_.SetLocalWorkspace(localWs_);
-    mmApplyG_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-    mmApplyG_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-    mmApplyG_.SetLocalWorkspace(localWs_);
 
 
     const uint32_t blockIdx = GetBlockIdx() % usedCoreNum_;
@@ -260,25 +251,6 @@ class WyCubeGemm {
     }
   }
 
-  // One solve slice written straight to GM as half: C[64,nCur] lands at column
-  // n0 of a [64,orgN] row-contiguous GM chunk. bFeed must be a contiguous
-  // [64,nCur] half block in UB (compact-copied by the caller).
-  __aicore__ inline void GemmApplyToGm(GlobalTensor<half> cGm, uint32_t orgN, LocalTensor<half> tUbHalf,
-                                       LocalTensor<half> bFeed, uint32_t nCur)
-  {
-    WaitVToMte3();
-    if (orgN != applyGOrgN_ || nCur != applyGN_) {
-      mmApplyG_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(orgN), WY_CUBE_CHUNK);
-      mmApplyG_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
-      applyGOrgN_ = orgN;
-      applyGN_ = nCur;
-    }
-    mmApplyG_.SetTensorA(tUbHalf, false);
-    mmApplyG_.SetTensorB(bFeed, false);
-    mmApplyG_.IterateAll(cGm);
-    PipeBarrier<PIPE_ALL>();
-  }
-
   // T = T + P @ T (64x64), operands fed straight from UB: aUb holds half(P),
   // bScratch receives half(T) cast fresh each call. floatScratch holds C.
   __aicore__ inline void GemmApplyAdd(LocalTensor<float> tUb, LocalTensor<half> aUb, LocalTensor<half> bScratch,
@@ -297,8 +269,6 @@ class WyCubeGemm {
 
  private:
   uint32_t applyShapeN_{WY_CUBE_CHUNK};
-  uint32_t applyGOrgN_{WY_CUBE_CHUNK};
-  uint32_t applyGN_{WY_CUBE_CHUNK};
 
   __aicore__ inline void WaitVToMte3() const
   {
@@ -350,7 +320,6 @@ class WyCubeGemm {
   WyMatmulNoTrans mmSquare_;
   WyMatmulApplyUb mmApplyU_;
   WyMatmulApplyUb mmApplyW_;
-  WyMatmulApplyGmC mmApplyG_;
   GlobalTensor<half> aGm_;
   GlobalTensor<half> bGm_;
   GlobalTensor<float> snapGm_;

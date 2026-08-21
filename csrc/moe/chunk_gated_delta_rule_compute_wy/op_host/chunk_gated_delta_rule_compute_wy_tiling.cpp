@@ -31,7 +31,7 @@ static constexpr uint32_t SNAP_BYTES = FIXED_CHUNK * FIXED_CHUNK * sizeof(float)
 static constexpr uint32_t PER_CORE_STAGING_BYTES = STAGING_A_BYTES + STAGING_B_BYTES + SNAP_BYTES;
 
 static ge::graphStatus FillCubeTiling(gert::TilingContext *context, int64_t m, int64_t n, int64_t k, bool bTranspose,
-                                      TCubeTiling &out, bool abFromUb = false, bool cGmHalf = false)
+                                      TCubeTiling &out, bool abFromUb = false)
 {
     auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
     matmul_tiling::MatmulApiTiling mm(ascendcPlatform);
@@ -40,14 +40,8 @@ static ge::graphStatus FillCubeTiling(gert::TilingContext *context, int64_t m, i
                 false);
     mm.SetBType(abPos, matmul_tiling::CubeFormat::ND, matmul_tiling::DataType::DT_FLOAT16,
                 bTranspose);
-    if (cGmHalf) {
-        // Solve results go straight to the output GM tensors as half.
-        mm.SetCType(matmul_tiling::TPosition::GM, matmul_tiling::CubeFormat::ND,
-                    matmul_tiling::DataType::DT_FLOAT16);
-    } else {
-        mm.SetCType(matmul_tiling::TPosition::VECCALC, matmul_tiling::CubeFormat::ND,
-                    matmul_tiling::DataType::DT_FLOAT);
-    }
+    mm.SetCType(matmul_tiling::TPosition::VECCALC, matmul_tiling::CubeFormat::ND,
+                matmul_tiling::DataType::DT_FLOAT);
     mm.SetBias(false);
     mm.SetOrgShape(m, n, k);
     // Cap the tiled block at the 64-wide chunk: on 310P a cube base dim of 128 is
@@ -135,12 +129,6 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
     }
     if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyW,
                        /*abFromUb=*/true) != ge::GRAPH_SUCCESS) {
-        return ge::GRAPH_FAILED;
-    }
-    // mmApplyG: same UB-fed solve but C written straight to the W/U output GM
-    // chunks as half (bhtd chunks are row-contiguous).
-    if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, FIXED_CHUNK, /*bTranspose=*/false, tiling.mmApplyG,
-                       /*abFromUb=*/true, /*cGmHalf=*/true) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
 

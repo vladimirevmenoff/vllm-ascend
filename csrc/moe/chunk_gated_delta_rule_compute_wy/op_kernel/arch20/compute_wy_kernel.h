@@ -94,7 +94,7 @@ class KernelComputeWy {
 
     const uint32_t localWsBytes = localWorkspaceSize_ == 0 ? (32 * 1024) : localWorkspaceSize_;
     pipe_->InitBuffer(mmLocalWsBuf_, localWsBytes);
-    cubeGemm_.Init(&tiling->mmAttn, &tiling->mmSquare, &tiling->mmApplyU, &tiling->mmApplyW, &tiling->mmApplyG, pipe_,
+    cubeGemm_.Init(&tiling->mmAttn, &tiling->mmSquare, &tiling->mmApplyU, &tiling->mmApplyW, pipe_,
                    mmLocalWsBuf_.Get<uint8_t>(), localWsBytes, workspace, tiling->workspaceOffset,
                    perCoreWorkspaceBytes_, usedCoreNum_, kHeadDim_, vHeadDim_);
 
@@ -637,23 +637,15 @@ class KernelComputeWy {
     if (useFp32ForwardSubstitution) {
       Fp32ForwardSubstitution(attnLocal, rhs, kHeadDim_, alignK_);
     } else {
-      // Solve slices stream straight to the W output chunk in GM as half —
-      // no fp32 W writeback, no cast-out, no separate store.
-      const uint64_t wBase = BhtdOffset(b, vHeadIdx, tokenStart, 0, vNumHead_, kHeadDim_);
-      for (uint32_t n0 = 0; n0 < kHeadDim_; n0 += FIXED_CHUNK_SIZE) {
-        const uint32_t nCur = (kHeadDim_ - n0) < FIXED_CHUNK_SIZE ? (kHeadDim_ - n0) : FIXED_CHUNK_SIZE;
-        CastFloatRowsToHalfSized(halfLocal, rhs[n0], FIXED_CHUNK_SIZE, nCur, alignK_);
-        cubeGemm_.GemmApplyToGm(wKernelGm_[wBase + n0], kHeadDim_, qHalf[ATTEN_ELEMS], halfLocal, nCur);
-      }
+      cubeGemm_.GemmApplyReplace(rhs, qHalf[ATTEN_ELEMS], halfLocal, scratch, kHeadDim_, alignK_, /*useU=*/false);
     }
-    // Kick the V load (halfLocal is free once the W solve consumed its slices).
+    // Kick the V load immediately (halfLocal is free once the W solve consumed
+    // its stagings); the W store drains from storeBuf under the whole U phase.
     LocalTensor<half> storeLocal = storeBuf_.Get<half>();
     LoadBthdChunk(vGm_, halfLocal, b, tokenStart, vHeadIdx, vNumHead_, vHeadDim_, alignV_);
-    if (useFp32ForwardSubstitution) {
-      Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkKElems_);
-      SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
-      StoreBhtdChunk(wKernelGm_, storeLocal, b, vHeadIdx, tokenStart, vNumHead_, kHeadDim_, alignK_);
-    }
+    Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkKElems_);
+    SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
+    StoreBhtdChunk(wKernelGm_, storeLocal, b, vHeadIdx, tokenStart, vNumHead_, kHeadDim_, alignK_);
 
     // ---- U = T @ (βV). ----
     SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
@@ -678,21 +670,11 @@ class KernelComputeWy {
       PipeBarrier<PIPE_V>();
       BroadcastMulRowsHalf(halfLocal, halfLocal, betaHalfVec, brcbHalf, FIXED_CHUNK_SIZE, vHeadDim_, alignV_,
                            alignV_);
-      // Solve slices stream straight to the U output chunk in GM as half; a
-      // strided slice is compact-copied first (the lib needs contiguous B).
-      const uint64_t uBase = BhtdOffset(b, vHeadIdx, tokenStart, 0, vNumHead_, vHeadDim_);
-      for (uint32_t n0 = 0; n0 < vHeadDim_; n0 += FIXED_CHUNK_SIZE) {
-        const uint32_t nCur = (vHeadDim_ - n0) < FIXED_CHUNK_SIZE ? (vHeadDim_ - n0) : FIXED_CHUNK_SIZE;
-        LocalTensor<half> bFeed = halfLocal;
-        if (!(n0 == 0 && alignV_ == nCur)) {
-          Muls(qHalf, halfLocal[n0], static_cast<half>(1), static_cast<uint64_t>(nCur), FIXED_CHUNK_SIZE,
-               {1, 1, static_cast<uint8_t>(nCur * sizeof(half) / 32),
-                static_cast<uint8_t>(alignV_ * sizeof(half) / 32)});
-          PipeBarrier<PIPE_V>();
-          bFeed = qHalf;
-        }
-        cubeGemm_.GemmApplyToGm(uKernelGm_[uBase + n0], vHeadDim_, qHalf[ATTEN_ELEMS], bFeed, nCur);
-      }
+      cubeGemm_.GemmApplyPreCastB(rhs, qHalf[ATTEN_ELEMS], halfLocal, qHalf, scratch, vHeadDim_, alignV_);
+      SyncEvent<HardEvent::MTE3_V>(HardEvent::MTE3_V);
+      Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
+      SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
+      StoreBhtdChunk(uKernelGm_, storeLocal, b, vHeadIdx, tokenStart, vNumHead_, vHeadDim_, alignV_);
     }
     SyncEvent<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
 
