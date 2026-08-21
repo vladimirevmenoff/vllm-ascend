@@ -380,6 +380,26 @@ class KernelComputeWy {
     }
     PipeBarrier<PIPE_V>();
   }
+  __aicore__ inline void BroadcastMulRowsHalf(LocalTensor<half> dst, const LocalTensor<half> rows,
+                                              const LocalTensor<half> scalePerRow, LocalTensor<half> brcbScratch,
+                                              uint32_t rowsCount, uint32_t cols, uint32_t dstLda,
+                                              uint32_t srcLda) const {
+    constexpr uint32_t HALF_PER_BLOCK = 16;
+    constexpr uint32_t HALF_VEC_LEN = 128;
+    const uint32_t blockCount = (rowsCount + FLOAT_PER_BLOCK - 1) / FLOAT_PER_BLOCK;
+    Brcb(brcbScratch, scalePerRow, blockCount, {1, static_cast<uint16_t>(FLOAT_PER_BLOCK)});
+    PipeBarrier<PIPE_V>();
+    const BinaryRepeatParams rp{1, 1, 0, static_cast<uint8_t>(dstLda / HALF_PER_BLOCK),
+                                static_cast<uint8_t>(srcLda / HALF_PER_BLOCK), 1};
+    uint32_t col = 0;
+    for (; col + HALF_VEC_LEN <= cols; col += HALF_VEC_LEN) {
+      Mul(dst[col], rows[col], brcbScratch, HALF_VEC_LEN, rowsCount, rp);
+    }
+    if (col < cols) {
+      Mul(dst[col], rows[col], brcbScratch, cols - col, rowsCount, rp);
+    }
+    PipeBarrier<PIPE_V>();
+  }
   __aicore__ inline void CastFloatRowsToHalf(LocalTensor<half> dst, const LocalTensor<float> src, uint32_t rows,
                                              uint32_t cols, uint32_t srcLda) {
     if (srcLda == cols) {
@@ -632,21 +652,33 @@ class KernelComputeWy {
 
     // ---- U = T @ (βV). ----
     SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
-    Cast(rhs, halfLocal, RoundMode::CAST_NONE, chunkVElems_);
-    PipeBarrier<PIPE_V>();
-    BroadcastMulRowsFloat(rhs, rhs, betaLocal, scratch, FIXED_CHUNK_SIZE, vHeadDim_, alignV_, alignV_);
-    // STAGECUT_6_pre_u_apply
     if (useFp32ForwardSubstitution) {
+      Cast(rhs, halfLocal, RoundMode::CAST_NONE, chunkVElems_);
+      PipeBarrier<PIPE_V>();
+      BroadcastMulRowsFloat(rhs, rhs, betaLocal, scratch, FIXED_CHUNK_SIZE, vHeadDim_, alignV_, alignV_);
       Fp32ForwardSubstitution(attnLocal, rhs, vHeadDim_, alignV_, qHalf, halfLocal, scratch);
+      // storeBuf may still be feeding the W store (MTE3 reads) — order the U cast.
+      SyncEvent<HardEvent::MTE3_V>(HardEvent::MTE3_V);
+      Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
+      SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
+      StoreBhtdChunk(uKernelGm_, storeLocal, b, vHeadIdx, tokenStart, vNumHead_, vHeadDim_, alignV_);
     } else {
-      cubeGemm_.GemmApplyReplace(rhs, qHalf[ATTEN_ELEMS], halfLocal, scratch, vHeadDim_, alignV_, /*useU=*/true);
+      // Half-domain U path: βV is computed directly in half (the product was
+      // always rounded to half before the cube, so the rounding point is
+      // unchanged) and the cube emits half C — no fp32 U ever materializes.
+      // rhsBuf is dead as fp32 here and hosts both half regions.
+      LocalTensor<half> rhsHalf = rhs.template ReinterpretCast<half>();
+      LocalTensor<half> betaHalfVec = betaHalfBuf_.Get<half>();
+      LocalTensor<half> brcbHalf = scratch.template ReinterpretCast<half>();
+      Cast(betaHalfVec, betaLocal, RoundMode::CAST_NONE, FIXED_CHUNK_SIZE);
+      PipeBarrier<PIPE_V>();
+      BroadcastMulRowsHalf(rhsHalf, halfLocal, betaHalfVec, brcbHalf, FIXED_CHUNK_SIZE, vHeadDim_, alignV_, alignV_);
+      // STAGECUT_6_pre_u_apply
+      cubeGemm_.GemmApplyHalfC(rhsHalf[FIXED_CHUNK_SIZE * maxAlign_], qHalf[ATTEN_ELEMS], rhsHalf, vHeadDim_);
+      // STAGECUT_7_post_u_apply
+      StoreBhtdChunk(uKernelGm_, rhsHalf[FIXED_CHUNK_SIZE * maxAlign_], b, vHeadIdx, tokenStart, vNumHead_,
+                     vHeadDim_, alignV_);
     }
-    // STAGECUT_7_post_u_apply
-    // storeBuf may still be feeding the W store (MTE3 reads) — order the U cast.
-    SyncEvent<HardEvent::MTE3_V>(HardEvent::MTE3_V);
-    Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
-    SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
-    StoreBhtdChunk(uKernelGm_, storeLocal, b, vHeadIdx, tokenStart, vNumHead_, vHeadDim_, alignV_);
     SyncEvent<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
     // STAGECUT_5_u_store
 

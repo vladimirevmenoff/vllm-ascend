@@ -60,3 +60,10 @@ from prior failed builds — filter by date.
 - (Also confirms doubling numerically exact in-silicon at tau=8, matching dblsim.)
 - Bisect: STAGECUT_6 (post beta*V, pre U-apply) / STAGECUT_7 (post U-apply) chain running.
   Expected: cut6~500 if V-load overlapped; cut7 tells if GemmApplyReplace(useU) is the cost.
+
+## 2026-08-21: c67 bisect result (canonical, tau=2.5)
+- cut4 (post W-solve+W-store+V-load-kick) = 450; cut6 (post V-cast+betaV) = 1200; cut7 (post U-solve) = 1920; full = 1920.
+- => V-cast+betaV segment = 750us (!!), U-solve = 720us, tail = 0. W region literally free; U region 1470us despite identical structure.
+- Mechanism suspect: per-call SetOrgShape/SetSingleShape churn (4/task) on scalar pipe + shared mmApplyU_ across BuildT/U-solve.
+- Probe in flight: sticky-shape (both solves on mmApplyW_, reshape only on nDim change; mmApplyU_ dedicated 64^3).
+- Fallback if flat: fuse W|U into one 64x256 apply (halves calls, batches cast/store); then attack V-load row-copy chain.
