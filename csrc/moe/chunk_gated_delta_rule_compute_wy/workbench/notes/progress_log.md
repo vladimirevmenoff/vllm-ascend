@@ -107,3 +107,11 @@ from prior failed builds — filter by date.
   64x64 = exactly 8KB -> K=V=64 shapes stayed green, masking it. First NaN run (gatefix 16:19 08-20) right after the ws-8KB ship.
 - Fix: ws back to 32KB (commit), chains now ship FULL op source (op_host+op_kernel) - never stale tiling again.
 - wsfix chain running: HEAD kernel (sliced+scalar+tau2.5) + ws32. PR 13122 head still carries ws8KB tiling - push fix after green.
+
+## 2026-08-21 16:20-16:40: GREEN at 1530us (3.05x) -> PR e00940bce; GM-C dead; honest ladder running
+- compact battery: ALL 9 cos=1.0. Canonical 1530-1550us = 3.05x honest. PR 13122 updated (e00940bce).
+- GM-C probe (solve slices -> W/U GM as half via mmApplyG): AICORE TIMEOUT. Both half-C paths (UB and GM) hang
+  with VECCALC A/B on this lib. Reverted (6f282f2c0). Lore updated: only fp32 C to UB scratch works.
+- New target: 800us (user order). Need -730 from 1530. Honest ladder chain (CUT2 front / CUT4 through-W+Vload / TAU8 / FULL)
+  running to place the fat before next lever. Candidates after: tau raise, UB-fed gram (kill GM restaging roundtrips),
+  cross-task overlap (task-end PIPE_ALL removal).

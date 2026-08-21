@@ -554,13 +554,14 @@ class KernelComputeWy {
     }
     SyncEvent<HardEvent::S_V>(HardEvent::S_V);
     for (uint32_t round = 0; round < DOUBLING_ROUNDS; ++round) {
+      // One cast pass feeds both matmuls of the round; P@T and P@P issue
+      // back-to-back under a single barrier (see GemmDoublingRound).
       Cast(pHalf, attnLocal, RoundMode::CAST_NONE, ATTEN_ELEMS);
+      Cast(tHalf, tOut, RoundMode::CAST_NONE, ATTEN_ELEMS);
       PipeBarrier<PIPE_V>();
-      cubeGemm_.GemmApplyAdd(tOut, pHalf, tHalf, cScratch);
-      if (round + 1 < DOUBLING_ROUNDS) {
-        cubeGemm_.GemmSquare(attnLocal, pHalf);
-        SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
-      }
+      cubeGemm_.GemmDoublingRound(attnLocal, pHalf, tHalf, cScratch, round + 1 < DOUBLING_ROUNDS);
+      Add(tOut, tOut, cScratch, ATTEN_ELEMS);
+      PipeBarrier<PIPE_V>();
     }
     // Keep half(T) resident in UB (tHalf); both RHS applies read it directly.
     Cast(tHalf, tOut, RoundMode::CAST_NONE, ATTEN_ELEMS);

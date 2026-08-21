@@ -251,6 +251,32 @@ class WyCubeGemm {
     }
   }
 
+  // One fused doubling round: C = P @ T (into floatScratch) and, unless it is
+  // the last round, P = P @ P (C straight into pUb — same non-alias as the old
+  // GemmSquare, both operands read from the half copy). Both matmuls issue
+  // back-to-back on separate objects under ONE PIPE_ALL, and the squares are
+  // UB-fed — the old GemmSquare GM staging round-trip (2xMTE3 + MTE2 + syncs
+  // per round) is gone. Caller adds T += floatScratch afterwards.
+  __aicore__ inline void GemmDoublingRound(LocalTensor<float> pUb, LocalTensor<half> pHalf, LocalTensor<half> tHalf,
+                                           LocalTensor<float> floatScratch, bool square)
+  {
+    WaitVToMte3();
+    mmApplyU_.SetTensorA(pHalf, false);
+    mmApplyU_.SetTensorB(tHalf, false);
+    mmApplyU_.IterateAll(floatScratch);
+    if (square) {
+      if (applyShapeN_ != WY_CUBE_CHUNK) {
+        mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+        mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
+        applyShapeN_ = WY_CUBE_CHUNK;
+      }
+      mmApplyW_.SetTensorA(pHalf, false);
+      mmApplyW_.SetTensorB(pHalf, false);
+      mmApplyW_.IterateAll(pUb);
+    }
+    PipeBarrier<PIPE_ALL>();
+  }
+
   // T = T + P @ T (64x64), operands fed straight from UB: aUb holds half(P),
   // bScratch receives half(T) cast fresh each call. floatScratch holds C.
   __aicore__ inline void GemmApplyAdd(LocalTensor<float> tUb, LocalTensor<half> aUb, LocalTensor<half> bScratch,
