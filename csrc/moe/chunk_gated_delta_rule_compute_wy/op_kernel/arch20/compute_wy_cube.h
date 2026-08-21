@@ -26,10 +26,7 @@ using WyMatmulBTrans = matmul::MatmulImpl<WyMmAType, WyMmBTransType, WyMmCType, 
 using WyMmAUbType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, false>;
 using WyMmBUbType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, false>;
 using WyMatmulApplyUb = matmul::MatmulImpl<WyMmAUbType, WyMmBUbType, WyMmCType, WyMmBiasType>;
-// Half-C variant: cube accumulates fp32 internally, emits half straight to UB —
-// the U solve stores its result without any fp32 materialization or cast.
-using WyMmCHalfUbType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half>;
-using WyMatmulApplyUbHalfC = matmul::MatmulImpl<WyMmAUbType, WyMmBUbType, WyMmCHalfUbType, WyMmBiasType>;
+// (half-C UB output wedges the 310P cube — aicore timeout; keep C fp32)
 
 // GM staging: A_half(64*MAX_HEAD) + B_half(64*MAX_HEAD). Cube writes C directly to UB.
 // Doubling applies U/W separately so N <= MAX_HEAD (no stacked 2N-wide staging).
@@ -66,8 +63,7 @@ class WyCubeGemm {
     mmApplyU_.Init(applyUTiling, pipe_);
     mmApplyW_.SetSubBlockIdx(0);
     mmApplyW_.Init(applyWTiling, pipe_);
-    mmApplyUH_.SetSubBlockIdx(0);
-    mmApplyUH_.Init(applyUTiling, pipe_);
+
 
     localWs_ = localWs;
     (void)localWsBytes;
@@ -89,9 +85,7 @@ class WyCubeGemm {
     mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
     mmApplyW_.SetLocalWorkspace(localWs_);
-    mmApplyUH_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-    mmApplyUH_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-    mmApplyUH_.SetLocalWorkspace(localWs_);
+
 
     const uint32_t blockIdx = GetBlockIdx() % usedCoreNum_;
     const uint64_t coreBase =
@@ -211,21 +205,20 @@ class WyCubeGemm {
   }
 
 
-  // C[64,nDim] (half) = T @ B; B is the ready-half beta*V the caller built in
-  // UB. No float C, no cast-out: the result is store-ready. Caller owns the
-  // V->MTE3 ordering only through this call's WaitVToMte3.
-  __aicore__ inline void GemmApplyHalfC(LocalTensor<half> cHalf, LocalTensor<half> tUbHalf, LocalTensor<half> bUb,
-                                        uint32_t nDim)
+  // C[64,nDim] (fp32) = T @ B; B is the ready-half beta*V the caller built in
+  // UB — skips the cast-out that GemmApplyReplace performs.
+  __aicore__ inline void GemmApplyPreCastB(LocalTensor<float> rUb, LocalTensor<half> tUbHalf, LocalTensor<half> bUb,
+                                           uint32_t nDim)
   {
     WaitVToMte3();
-    if (nDim != applyHalfShapeN_) {
-      mmApplyUH_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      mmApplyUH_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      applyHalfShapeN_ = nDim;
+    if (nDim != applyShapeN_) {
+      mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
+      mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
+      applyShapeN_ = nDim;
     }
-    mmApplyUH_.SetTensorA(tUbHalf, false);
-    mmApplyUH_.SetTensorB(bUb, false);
-    mmApplyUH_.IterateAll(cHalf);
+    mmApplyW_.SetTensorA(tUbHalf, false);
+    mmApplyW_.SetTensorB(bUb, false);
+    mmApplyW_.IterateAll(rUb);
     PipeBarrier<PIPE_ALL>();
   }
 
@@ -247,7 +240,6 @@ class WyCubeGemm {
 
  private:
   uint32_t applyShapeN_{WY_CUBE_CHUNK};
-  uint32_t applyHalfShapeN_{WY_CUBE_CHUNK};
 
   __aicore__ inline void WaitVToMte3() const
   {
@@ -299,7 +291,6 @@ class WyCubeGemm {
   WyMatmulNoTrans mmSquare_;
   WyMatmulApplyUb mmApplyU_;
   WyMatmulApplyUb mmApplyW_;
-  WyMatmulApplyUbHalfC mmApplyUH_;
   GlobalTensor<half> aGm_;
   GlobalTensor<half> bGm_;
   GlobalTensor<float> snapGm_;

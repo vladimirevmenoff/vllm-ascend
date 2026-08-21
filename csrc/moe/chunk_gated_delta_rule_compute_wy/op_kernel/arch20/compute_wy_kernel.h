@@ -663,21 +663,23 @@ class KernelComputeWy {
       SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
       StoreBhtdChunk(uKernelGm_, storeLocal, b, vHeadIdx, tokenStart, vNumHead_, vHeadDim_, alignV_);
     } else {
-      // Half-domain U path: βV is computed directly in half (the product was
-      // always rounded to half before the cube, so the rounding point is
-      // unchanged) and the cube emits half C — no fp32 U ever materializes.
-      // rhsBuf is dead as fp32 here and hosts both half regions.
-      LocalTensor<half> rhsHalf = rhs.template ReinterpretCast<half>();
+      // Half-domain U path: βV is computed directly in half, in place on the
+      // loaded V (the product was always rounded to half before the cube, so
+      // the rounding point is unchanged); the h→f V cast and the apply's
+      // cast-out both disappear. C stays fp32 (half C wedges the 310P cube).
       LocalTensor<half> betaHalfVec = betaHalfBuf_.Get<half>();
       LocalTensor<half> brcbHalf = scratch.template ReinterpretCast<half>();
       Cast(betaHalfVec, betaLocal, RoundMode::CAST_NONE, FIXED_CHUNK_SIZE);
       PipeBarrier<PIPE_V>();
-      BroadcastMulRowsHalf(rhsHalf, halfLocal, betaHalfVec, brcbHalf, FIXED_CHUNK_SIZE, vHeadDim_, alignV_, alignV_);
+      BroadcastMulRowsHalf(halfLocal, halfLocal, betaHalfVec, brcbHalf, FIXED_CHUNK_SIZE, vHeadDim_, alignV_,
+                           alignV_);
       // STAGECUT_6_pre_u_apply
-      cubeGemm_.GemmApplyHalfC(rhsHalf[FIXED_CHUNK_SIZE * maxAlign_], qHalf[ATTEN_ELEMS], rhsHalf, vHeadDim_);
+      cubeGemm_.GemmApplyPreCastB(rhs, qHalf[ATTEN_ELEMS], halfLocal, vHeadDim_);
       // STAGECUT_7_post_u_apply
-      StoreBhtdChunk(uKernelGm_, rhsHalf[FIXED_CHUNK_SIZE * maxAlign_], b, vHeadIdx, tokenStart, vNumHead_,
-                     vHeadDim_, alignV_);
+      SyncEvent<HardEvent::MTE3_V>(HardEvent::MTE3_V);
+      Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
+      SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
+      StoreBhtdChunk(uKernelGm_, storeLocal, b, vHeadIdx, tokenStart, vNumHead_, vHeadDim_, alignV_);
     }
     SyncEvent<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
     // STAGECUT_5_u_store
