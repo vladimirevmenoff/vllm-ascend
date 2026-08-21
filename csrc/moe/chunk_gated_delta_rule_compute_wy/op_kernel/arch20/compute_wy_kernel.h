@@ -646,6 +646,7 @@ class KernelComputeWy {
     SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     StoreBhtdChunk(uKernelGm_, storeLocal, b, vHeadIdx, tokenStart, vNumHead_, vHeadDim_, alignV_);
     SyncEvent<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
+    // STAGECUT_5_u_store
 
     if ((vHeadIdx % headGroups_) == 0) {
       StoreQKKernel(b, kHeadIdx, tokenStart, qHalf);

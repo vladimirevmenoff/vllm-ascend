@@ -40,3 +40,16 @@ Then: async Iterate pairing (square || apply), early-exit rounds when P underflo
 4c9590a84: exact fp32 solve, 16-row blocks, off-diag on cube vs solved prefix.
 All shapes ~halved (1,256: 598; 1,192: 822; 1,512: 376; min-shape 210).
 Remaining to 3x (<=1560): 1.27x. Next: BLK 8 probe → async pairing → overlap.
+
+## 2026-08-21 session state (canonical scoreboard, all cos=1.0 x9)
+4691 base → 1979 (blocked substitution 4c9590a84) → 1933 (barrier-free diag cfd1b45a0)
+→ 1902 (store/load overlap ae2e68f4d + fix) → 1920±15 plateau after thr2.5 (τ change
+bought ~0 on canonical). BUG FIXED en route: halfBuf fp32-C-scratch overflow at
+head-dim 64 clobbered rhsBuf (d944aa9a0) — was the REAL cause of both K64 cos-fails
+(0.16@τ4, 0.21@τ2.5); numerics of fp16 doubling are exact per host sim (dblsim.py).
+K64-shape now 433us (was 1200 at session start).
+Current: 2.44x. Target 1560 needs −360. Mini-ladder2 running (cuts 2/4) to split
+the 1920 into loads+gram | W-solve | U-tail on the CURRENT kernel.
+Process guards active: verify tarball size after scp (0-byte upload happened),
+docker start claude_13122 (container died once), stale-log lines in opbuild.log
+from prior failed builds — filter by date.
