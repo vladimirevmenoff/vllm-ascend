@@ -33,7 +33,7 @@ constexpr uint32_t DOUBLING_ROUNDS = 6;  // log2(64)
 // the whole op. fp16 headroom through the doubling products tolerates far more;
 // 4.0 keeps the truly pathological chunks (and NaN) on the exact fp32 path and
 // is validated by the 9-shape adversarial cosine battery.
-constexpr float FP32_FS_ROW_SUM_THRESHOLD = 8.0f;
+constexpr float FP32_FS_ROW_SUM_THRESHOLD = 2.5f;
 
 __aicore__ inline uint32_t AlignUp(uint32_t value, uint32_t align) { return (value + align - 1) / align * align; }
 __aicore__ inline uint16_t BytesToBlocks(uint32_t bytes) { return static_cast<uint16_t>(AlignUp(bytes, BLOCK_BYTES) / BLOCK_BYTES); }
@@ -635,11 +635,13 @@ class KernelComputeWy {
     Cast(rhs, halfLocal, RoundMode::CAST_NONE, chunkVElems_);
     PipeBarrier<PIPE_V>();
     BroadcastMulRowsFloat(rhs, rhs, betaLocal, scratch, FIXED_CHUNK_SIZE, vHeadDim_, alignV_, alignV_);
+    // STAGECUT_6_pre_u_apply
     if (useFp32ForwardSubstitution) {
       Fp32ForwardSubstitution(attnLocal, rhs, vHeadDim_, alignV_, qHalf, halfLocal, scratch);
     } else {
       cubeGemm_.GemmApplyReplace(rhs, qHalf[ATTEN_ELEMS], halfLocal, scratch, vHeadDim_, alignV_, /*useU=*/true);
     }
+    // STAGECUT_7_post_u_apply
     // storeBuf may still be feeding the W store (MTE3 reads) — order the U cast.
     SyncEvent<HardEvent::MTE3_V>(HardEvent::MTE3_V);
     Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
