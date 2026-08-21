@@ -53,3 +53,10 @@ the 1920 into loads+gram | W-solve | U-tail on the CURRENT kernel.
 Process guards active: verify tarball size after scp (0-byte upload happened),
 docker start claude_13122 (container died once), stale-log lines in opbuild.log
 from prior failed builds — filter by date.
+
+## 2026-08-21: tau=8 probe + U-block bisect
+- tau=8 battery: cos=1.0 everywhere, prod shape 1905-1935us — NO CHANGE vs tau=2.5.
+  Conclusion: gate isn't the problem; U-phase 1445us happens on doubling path. tau reverted to 2.5.
+- (Also confirms doubling numerically exact in-silicon at tau=8, matching dblsim.)
+- Bisect: STAGECUT_6 (post beta*V, pre U-apply) / STAGECUT_7 (post U-apply) chain running.
+  Expected: cut6~500 if V-load overlapped; cut7 tells if GemmApplyReplace(useU) is the cost.

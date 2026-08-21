@@ -184,33 +184,20 @@ class WyCubeGemm {
     // (B was cast out to bScratch first, so no aliasing), removing both the
     // second matmul call and the writeback pass. floatScratch unused here.
     (void)floatScratch;
+    (void)useU;
     CastFloatRowsToHalfContiguous(bScratch, rUb, WY_CUBE_CHUNK, nDim, rLda);
     WaitVToMte3();
-    if (useU) {
-      if (nDim != WY_CUBE_CHUNK) {
-        mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-        mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      }
-      mmApplyU_.SetTensorA(tUbHalf, false);
-      mmApplyU_.SetTensorB(bScratch, false);
-      mmApplyU_.IterateAll(rUb);
-      if (nDim != WY_CUBE_CHUNK) {
-        mmApplyU_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-        mmApplyU_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-      }
-    } else {
-      if (nDim != WY_CUBE_CHUNK) {
-        mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-        mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      }
-      mmApplyW_.SetTensorA(tUbHalf, false);
-      mmApplyW_.SetTensorB(bScratch, false);
-      mmApplyW_.IterateAll(rUb);
-      if (nDim != WY_CUBE_CHUNK) {
-        mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-        mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, WY_CUBE_CHUNK);
-      }
+    // Both solves run on mmApplyW_ (identical [64,nDim,64] shape); the shape is
+    // sticky across calls so a task at the previous nDim pays no reconfigure.
+    // mmApplyU_ stays dedicated to the 64^3 BuildT/GemmApplyAdd traffic.
+    if (nDim != applyShapeN_) {
+      mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
+      mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
+      applyShapeN_ = nDim;
     }
+    mmApplyW_.SetTensorA(tUbHalf, false);
+    mmApplyW_.SetTensorB(bScratch, false);
+    mmApplyW_.IterateAll(rUb);
     PipeBarrier<PIPE_ALL>();
   }
 
@@ -232,6 +219,8 @@ class WyCubeGemm {
   }
 
  private:
+  uint32_t applyShapeN_{WY_CUBE_CHUNK};
+
   __aicore__ inline void WaitVToMte3() const
   {
     event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(HardEvent::V_MTE3));
