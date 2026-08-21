@@ -99,3 +99,11 @@ from prior failed builds — filter by date.
   first NaN gatefix 08-20 16:19 (cut builds + fusion probe in between).
 - Hypotheses: (a) device 6 wedged (aicore hang 12:59 today, maybe earlier ones yesterday), (b) yesterday's good runs were dirty-tree states.
 - Running: goodbase chain = PR-head 8b4ce7d9a arch20 (serving-validated code). NaN => environment (npu reset); green => commit bisect.
+
+## 2026-08-21 15:48: ROOT CAUSE FOUND — LOCAL_WORKSPACE 8KB overruns at head dim 128
+- Chain of evidence: baseline arch20 NaN on box (env not code) -> dev7 also NaN (not device) -> box op_host md5 = campaign HEAD
+  (chains only ever re-ship arch20; tiling.cpp stale since ~yesterday 16:00) -> tiling diff: c58108996 ws 32KB->8KB.
+- Mechanism: matmul lib stages VECCALC A/B via localWs; 64x128 half B = 16KB > 8KB -> silent overrun -> NaN.
+  64x64 = exactly 8KB -> K=V=64 shapes stayed green, masking it. First NaN run (gatefix 16:19 08-20) right after the ws-8KB ship.
+- Fix: ws back to 32KB (commit), chains now ship FULL op source (op_host+op_kernel) - never stale tiling again.
+- wsfix chain running: HEAD kernel (sliced+scalar+tau2.5) + ws32. PR 13122 head still carries ws8KB tiling - push fix after green.

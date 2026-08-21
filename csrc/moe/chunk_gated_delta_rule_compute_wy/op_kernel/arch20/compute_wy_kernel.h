@@ -670,7 +670,7 @@ class KernelComputeWy {
       PipeBarrier<PIPE_V>();
       BroadcastMulRowsHalf(halfLocal, halfLocal, betaHalfVec, brcbHalf, FIXED_CHUNK_SIZE, vHeadDim_, alignV_,
                            alignV_);
-      cubeGemm_.GemmApplyPreCastB(rhs, qHalf[ATTEN_ELEMS], halfLocal, scratch, vHeadDim_, alignV_);
+      cubeGemm_.GemmApplyPreCastB(rhs, qHalf[ATTEN_ELEMS], halfLocal, qHalf, scratch, vHeadDim_, alignV_);
       SyncEvent<HardEvent::MTE3_V>(HardEvent::MTE3_V);
       Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
       SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
