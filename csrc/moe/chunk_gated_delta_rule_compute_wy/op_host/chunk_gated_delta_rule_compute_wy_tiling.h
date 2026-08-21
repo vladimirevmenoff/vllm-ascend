@@ -25,6 +25,7 @@ TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmAttn);
 TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmSquare);
 TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmApplyU);
 TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmApplyW);
+TILING_DATA_FIELD_DEF_STRUCT(TCubeTiling, mmApplyG);
 END_TILING_DATA_DEF;
 
 REGISTER_TILING_DATA_CLASS(ChunkGatedDeltaRuleComputeWy, ChunkGatedDeltaRuleComputeWyTilingData)

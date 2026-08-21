@@ -34,6 +34,7 @@ struct alignas(8) ChunkGatedDeltaRuleComputeWyTilingData {
     TCubeTiling mmSquare;
     TCubeTiling mmApplyU;
     TCubeTiling mmApplyW;
+    TCubeTiling mmApplyG;
 };
 #pragma pack(pop)
 
