@@ -113,7 +113,17 @@ class KernelComputeWy {
     //  - rhsBuf_:   the single resident fp32 RHS (γβK for W, then βV for U).
     const uint32_t qHalfElems = FIXED_CHUNK_SIZE * (maxAlign < 2 * FIXED_CHUNK_SIZE ? 2 * FIXED_CHUNK_SIZE : maxAlign);
     pipe_->InitBuffer(qHalfBuf_, qHalfElems * sizeof(half));
-    pipe_->InitBuffer(halfBuf_, FIXED_CHUNK_SIZE * maxAlign * sizeof(half));
+    // halfBuf_ doubles (reinterpreted as fp32) as the 64x64 C scratch of the
+    // T-build applies — that role needs ATTEN_ELEMS*4 bytes regardless of head
+    // dim. At head dim 64 the natural size is only 8KB and the matmul C-write
+    // clobbered rhsBuf_ (the cos=0.16/0.21 failures on K=V=64 shapes whenever
+    // those tasks took the doubling path).
+    {
+      uint32_t halfBytes = FIXED_CHUNK_SIZE * maxAlign * static_cast<uint32_t>(sizeof(half));
+      const uint32_t cScratchBytes = ATTEN_ELEMS * static_cast<uint32_t>(sizeof(float));
+      if (halfBytes < cScratchBytes) halfBytes = cScratchBytes;
+      pipe_->InitBuffer(halfBuf_, halfBytes);
+    }
     pipe_->InitBuffer(rhsBuf_, FIXED_CHUNK_SIZE * maxAlign * sizeof(float));
     // Dedicated output staging: W/U casts land here so their MTE3 stores drain
     // underneath the next phase instead of serializing on halfBuf_.
