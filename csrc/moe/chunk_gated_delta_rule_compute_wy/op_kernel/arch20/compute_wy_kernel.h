@@ -33,7 +33,7 @@ constexpr uint32_t DOUBLING_ROUNDS = 6;  // log2(64)
 // the whole op. fp16 headroom through the doubling products tolerates far more;
 // 4.0 keeps the truly pathological chunks (and NaN) on the exact fp32 path and
 // is validated by the 9-shape adversarial cosine battery.
-constexpr float FP32_FS_ROW_SUM_THRESHOLD = 2.5f;
+constexpr float FP32_FS_ROW_SUM_THRESHOLD = 1e30f;  // PROBE: force doubling (gate value suspected garbage)
 
 __aicore__ inline uint32_t AlignUp(uint32_t value, uint32_t align) { return (value + align - 1) / align * align; }
 __aicore__ inline uint16_t BytesToBlocks(uint32_t bytes) { return static_cast<uint16_t>(AlignUp(bytes, BLOCK_BYTES) / BLOCK_BYTES); }

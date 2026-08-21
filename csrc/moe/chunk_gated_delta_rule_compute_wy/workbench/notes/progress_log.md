@@ -67,3 +67,20 @@ from prior failed builds — filter by date.
 - Mechanism suspect: per-call SetOrgShape/SetSingleShape churn (4/task) on scalar pipe + shared mmApplyU_ across BuildT/U-solve.
 - Probe in flight: sticky-shape (both solves on mmApplyW_, reshape only on nDim change; mmApplyU_ dedicated 64^3).
 - Fallback if flat: fuse W|U into one 64x256 apply (halves calls, batches cast/store); then attack V-load row-copy chain.
+
+## 2026-08-21 afternoon: three flat probes + ablation pivot
+- sticky-shape (no per-call SetOrgShape): FLAT ~1990. Reshape churn not the cost.
+- half-C UB matmul: AICORE TIMEOUT — half C to VECCALC wedges 310P cube. Documented in cube header.
+- uhalf2 (betaV in half, in place; h->f cast + fp32 mul + cast-out deleted): cos=1.0 all 9, FLAT ~1940. KEPT (less work, same speed).
+- => cut-ladder attribution unreliable; every local op removal is flat. Pivot: subtractive ablations on real control flow
+  (NOSOLVE / NOVLOAD / NOUSTORE / FULL restore) — timing-only, cos expected to fail on ablated builds.
+
+## 2026-08-21 ~14:20 UTC: HARNESS NaN BUG — ALL cos=1.0 SINCE `blocked` INVALID ON CANONICAL
+- run_fast.py used worst=min(worst,cos); Python min() ignores NaN -> NaN W/U reported as min_cos=1.000000.
+- Saved JSONs: baseline_light w/u GOOD; blocked.json onward w=nan u=nan on canonical (also deslice, t8, t25, sticky, uhalf2, all abl_*).
+  descal.json + ub_probe.json eras were GOOD (w=1.0, u=0.99999) - bisect anchors.
+- => the whole 1979->1920 plateau + all cut/ablation attribution was measured on a kernel emitting NaN W/U on canonical.
+  4691 baseline valid. Everything since must be re-derived after correctness restored.
+- Harness fixed (NaN -> cos=-1.0). truth.json battery = current kernel's real damage map.
+- Next: tau=0 vs tau=1e30 probes attribute NaN to fp32-substitution vs doubling path; then git bisect local commits (~5 builds).
+- Gate-always-true theory WRONG (based on poisoned ablations). Real story: NaN swallowed.
