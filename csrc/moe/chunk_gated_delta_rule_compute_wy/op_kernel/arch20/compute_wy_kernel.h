@@ -611,14 +611,16 @@ class KernelComputeWy {
     } else {
       cubeGemm_.GemmApplyReplace(rhs, qHalf[ATTEN_ELEMS], halfLocal, scratch, kHeadDim_, alignK_, /*useU=*/false);
     }
-    Cast(halfLocal, rhs, RoundMode::CAST_NONE, chunkKElems_);
+    // Kick the V load immediately (halfLocal is free once the W solve consumed
+    // its stagings); the W store drains from storeBuf under the whole U phase.
+    LocalTensor<half> storeLocal = storeBuf_.Get<half>();
+    LoadBthdChunk(vGm_, halfLocal, b, tokenStart, vHeadIdx, vNumHead_, vHeadDim_, alignV_);
+    Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkKElems_);
     SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
-    StoreBhtdChunk(wKernelGm_, halfLocal, b, vHeadIdx, tokenStart, vNumHead_, kHeadDim_, alignK_);
-    SyncEvent<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
+    StoreBhtdChunk(wKernelGm_, storeLocal, b, vHeadIdx, tokenStart, vNumHead_, kHeadDim_, alignK_);
     // STAGECUT_4_w_apply_store
 
-    // ---- U = T @ (βV): load V only now. ----
-    LoadBthdChunk(vGm_, halfLocal, b, tokenStart, vHeadIdx, vNumHead_, vHeadDim_, alignV_);
+    // ---- U = T @ (βV). ----
     SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
     Cast(rhs, halfLocal, RoundMode::CAST_NONE, chunkVElems_);
     PipeBarrier<PIPE_V>();
