@@ -18,9 +18,11 @@ static constexpr int64_t FIXED_CHUNK = 64;
 // 310P dav_m200 UB is 192KB. K=V=128 fits since the kernel solves W and U in two
 // passes with a single fp32 RHS resident (~178KB peak); see compute_wy_kernel.h.
 static constexpr int64_t MAX_HEAD_DIM = 128;
-// 8KB suffices for the 64^3 ND matmuls (single-tile iterates); frees 24KB of
-// UB for the software-pipeline ping/pong buffers.
-static constexpr uint32_t LOCAL_WORKSPACE_BYTES = 8 * 1024;
+// 32KB: the matmul lib stages VECCALC operands through this workspace; a
+// 128-wide apply needs 16KB for B alone. 8KB (a prior shrink) silently
+// overruns at head dim 128 and emits NaN — K=64 fit exactly and stayed green,
+// which hid the breakage for a day.
+static constexpr uint32_t LOCAL_WORKSPACE_BYTES = 32 * 1024;
 // Per-core GM staging for Cube inputs: A_half(64*MAX_HEAD_DIM) + B_half(64*MAX_HEAD_DIM).
 static constexpr uint32_t STAGING_A_BYTES = FIXED_CHUNK * MAX_HEAD_DIM * sizeof(uint16_t);
 static constexpr uint32_t STAGING_B_BYTES = FIXED_CHUNK * MAX_HEAD_DIM * sizeof(uint16_t);

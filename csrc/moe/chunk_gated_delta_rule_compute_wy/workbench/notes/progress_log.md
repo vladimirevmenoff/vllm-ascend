@@ -84,3 +84,18 @@ from prior failed builds — filter by date.
 - Harness fixed (NaN -> cos=-1.0). truth.json battery = current kernel's real damage map.
 - Next: tau=0 vs tau=1e30 probes attribute NaN to fp32-substitution vs doubling path; then git bisect local commits (~5 builds).
 - Gate-always-true theory WRONG (based on poisoned ablations). Real story: NaN swallowed.
+
+## 2026-08-21 ~15:15: slicefix battery RED — K=128 shapes still NaN
+- Pushed candidate (sliced applies + scalar fallback + tau2.5): 8/9 NaN; ONLY 1,256,8,16,64,64 (K=V=64) green.
+- NaN correlates with dim=128. Suspects among never-truly-verified post-deslice commits: storeBuf overlap ae2e68f4d,
+  uhalf2 half-betaV, sticky shapes, or my 2-slice apply loop.
+- PR 13122 head 34d702c58 = this red code (K=128 broken). Fix will be pushed on top.
+- Pivot: goodera chain = d95c30a8e arch20 (last device-verified good) + tau2.5 → sanity green + honest optimized timing.
+  Then re-add post-deslice pieces stepwise. Canonical timing at slicefix (sliced+scalar): ~4300us (scalar fallback dominating).
+
+## 2026-08-21 ~15:30: goodera (d95c30a8e) ALSO NaN today -> env-vs-code test
+- d95c30a8e + tau2.5: 8/9 NaN, K64 shape 0.206 (not even NaN-clean). Same code class was green yesterday 15:09.
+- Goldens verified clean (08-20 timestamps, no NaN). No op_host commits post-good. JSON chronology: last good run descal 08-20 15:09;
+  first NaN gatefix 08-20 16:19 (cut builds + fusion probe in between).
+- Hypotheses: (a) device 6 wedged (aicore hang 12:59 today, maybe earlier ones yesterday), (b) yesterday's good runs were dirty-tree states.
+- Running: goodbase chain = PR-head 8b4ce7d9a arch20 (serving-validated code). NaN => environment (npu reset); green => commit bisect.
