@@ -33,7 +33,7 @@ constexpr uint32_t DOUBLING_ROUNDS = 6;  // log2(64)
 // the whole op. fp16 headroom through the doubling products tolerates far more;
 // 4.0 keeps the truly pathological chunks (and NaN) on the exact fp32 path and
 // is validated by the 9-shape adversarial cosine battery.
-constexpr float FP32_FS_ROW_SUM_THRESHOLD = 1e30f;  // PROBE: force doubling (gate value suspected garbage)
+constexpr float FP32_FS_ROW_SUM_THRESHOLD = 2.5f;
 
 __aicore__ inline uint32_t AlignUp(uint32_t value, uint32_t align) { return (value + align - 1) / align * align; }
 __aicore__ inline uint16_t BytesToBlocks(uint32_t bytes) { return static_cast<uint16_t>(AlignUp(bytes, BLOCK_BYTES) / BLOCK_BYTES); }
@@ -608,7 +608,6 @@ class KernelComputeWy {
     // both the g gather source and the in-flight Kβ product.
     SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
     BuildCumulativeG(b, vHeadIdx, tokenStart, gLocal, expGLocal, reduceScratch, attnLocal, ATTEN_ELEMS);
-    // STAGECUT_1_loads_bk_g
 
     // Cube: G = Kβ @ K^T → attnLocal; then A = −strictlower(G ⊙ Λ).
     CastFloatRowsToHalf(qHalf, rhs, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
@@ -618,7 +617,6 @@ class KernelComputeWy {
     Muls(attnLocal, attnLocal, -1.0f, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
     ApplyLambdaNegStrictLower(attnLocal, gLocal, scratch);
-    // STAGECUT_2_gram_lambda
 
     // Pass-1 RHS: rhs already holds βK; apply γ = exp(a) in place → W RHS.
     BroadcastMulRowsFloat(rhs, rhs, expGLocal, scratch, FIXED_CHUNK_SIZE, kHeadDim_, alignK_, alignK_);
@@ -637,7 +635,7 @@ class KernelComputeWy {
 
     // ---- W = T @ (γβK), resident in rhs. halfLocal stages R halves. ----
     if (useFp32ForwardSubstitution) {
-      Fp32ForwardSubstitution(attnLocal, rhs, kHeadDim_, alignK_, qHalf, halfLocal, scratch);
+      Fp32ForwardSubstitution(attnLocal, rhs, kHeadDim_, alignK_);
     } else {
       cubeGemm_.GemmApplyReplace(rhs, qHalf[ATTEN_ELEMS], halfLocal, scratch, kHeadDim_, alignK_, /*useU=*/false);
     }
@@ -648,7 +646,6 @@ class KernelComputeWy {
     Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkKElems_);
     SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     StoreBhtdChunk(wKernelGm_, storeLocal, b, vHeadIdx, tokenStart, vNumHead_, kHeadDim_, alignK_);
-    // STAGECUT_4_w_apply_store
 
     // ---- U = T @ (βV). ----
     SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
@@ -656,7 +653,7 @@ class KernelComputeWy {
       Cast(rhs, halfLocal, RoundMode::CAST_NONE, chunkVElems_);
       PipeBarrier<PIPE_V>();
       BroadcastMulRowsFloat(rhs, rhs, betaLocal, scratch, FIXED_CHUNK_SIZE, vHeadDim_, alignV_, alignV_);
-      Fp32ForwardSubstitution(attnLocal, rhs, vHeadDim_, alignV_, qHalf, halfLocal, scratch);
+      Fp32ForwardSubstitution(attnLocal, rhs, vHeadDim_, alignV_);
       // storeBuf may still be feeding the W store (MTE3 reads) — order the U cast.
       SyncEvent<HardEvent::MTE3_V>(HardEvent::MTE3_V);
       Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
@@ -673,16 +670,13 @@ class KernelComputeWy {
       PipeBarrier<PIPE_V>();
       BroadcastMulRowsHalf(halfLocal, halfLocal, betaHalfVec, brcbHalf, FIXED_CHUNK_SIZE, vHeadDim_, alignV_,
                            alignV_);
-      // STAGECUT_6_pre_u_apply
       cubeGemm_.GemmApplyPreCastB(rhs, qHalf[ATTEN_ELEMS], halfLocal, scratch, vHeadDim_, alignV_);
-      // STAGECUT_7_post_u_apply
       SyncEvent<HardEvent::MTE3_V>(HardEvent::MTE3_V);
       Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
       SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
       StoreBhtdChunk(uKernelGm_, storeLocal, b, vHeadIdx, tokenStart, vNumHead_, vHeadDim_, alignV_);
     }
     SyncEvent<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
-    // STAGECUT_5_u_store
 
     if ((vHeadIdx % headGroups_) == 0) {
       StoreQKKernel(b, kHeadIdx, tokenStart, qHalf);
