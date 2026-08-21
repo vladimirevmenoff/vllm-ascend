@@ -674,7 +674,7 @@ class KernelComputeWy {
       BroadcastMulRowsHalf(halfLocal, halfLocal, betaHalfVec, brcbHalf, FIXED_CHUNK_SIZE, vHeadDim_, alignV_,
                            alignV_);
       // STAGECUT_6_pre_u_apply
-      cubeGemm_.GemmApplyPreCastB(rhs, qHalf[ATTEN_ELEMS], halfLocal, vHeadDim_);
+      cubeGemm_.GemmApplyPreCastB(rhs, qHalf[ATTEN_ELEMS], halfLocal, scratch, vHeadDim_, alignV_);
       // STAGECUT_7_post_u_apply
       SyncEvent<HardEvent::MTE3_V>(HardEvent::MTE3_V);
       Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);

@@ -186,40 +186,56 @@ class WyCubeGemm {
     // DESLICE: one full-width call per RHS — C is written straight into rUb
     // (B was cast out to bScratch first, so no aliasing), removing both the
     // second matmul call and the writeback pass. floatScratch unused here.
-    (void)floatScratch;
+    // Sliced solve: C goes to floatScratch (64x64 fp32, fits tmpBuf) and is
+    // written back into the rUb slice. Writing C straight into rUb (the
+    // "deslice" experiment) silently emits NaN on the m200 VECCALC-C path —
+    // discovered 2026-08-21 after the harness NaN-masking bug was fixed.
     (void)useU;
-    CastFloatRowsToHalfContiguous(bScratch, rUb, WY_CUBE_CHUNK, nDim, rLda);
-    WaitVToMte3();
-    // Both solves run on mmApplyW_ (identical [64,nDim,64] shape); the shape is
-    // sticky across calls so a task at the previous nDim pays no reconfigure.
-    // mmApplyU_ stays dedicated to the 64^3 BuildT/GemmApplyAdd traffic.
-    if (nDim != applyShapeN_) {
-      mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      applyShapeN_ = nDim;
+    for (uint32_t n0 = 0; n0 < nDim; n0 += WY_CUBE_CHUNK) {
+      const uint32_t nCur = (nDim - n0) < WY_CUBE_CHUNK ? (nDim - n0) : WY_CUBE_CHUNK;
+      CastFloatRowsToHalfContiguous(bScratch, rUb[n0], WY_CUBE_CHUNK, nCur, rLda);
+      WaitVToMte3();
+      if (nCur != applyShapeN_) {
+        mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        applyShapeN_ = nCur;
+      }
+      mmApplyW_.SetTensorA(tUbHalf, false);
+      mmApplyW_.SetTensorB(bScratch, false);
+      mmApplyW_.IterateAll(floatScratch);
+      PipeBarrier<PIPE_ALL>();
+      Adds(rUb[n0], floatScratch, 0.0f, static_cast<uint64_t>(nCur), WY_CUBE_CHUNK,
+           {1, 1, static_cast<uint8_t>(rLda * sizeof(float) / 32),
+            static_cast<uint8_t>(nCur * sizeof(float) / 32)});
+      PipeBarrier<PIPE_V>();
     }
-    mmApplyW_.SetTensorA(tUbHalf, false);
-    mmApplyW_.SetTensorB(bScratch, false);
-    mmApplyW_.IterateAll(rUb);
-    PipeBarrier<PIPE_ALL>();
   }
 
 
   // C[64,nDim] (fp32) = T @ B; B is the ready-half beta*V the caller built in
   // UB — skips the cast-out that GemmApplyReplace performs.
   __aicore__ inline void GemmApplyPreCastB(LocalTensor<float> rUb, LocalTensor<half> tUbHalf, LocalTensor<half> bUb,
-                                           uint32_t nDim)
+                                           LocalTensor<float> floatScratch, uint32_t nDim, uint32_t bLda)
   {
+    // Same sliced C-scratch discipline as GemmApplyReplace (direct C into rUb
+    // NaNs); B is already half so each slice skips the cast-out.
     WaitVToMte3();
-    if (nDim != applyShapeN_) {
-      mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nDim), WY_CUBE_CHUNK);
-      applyShapeN_ = nDim;
+    for (uint32_t n0 = 0; n0 < nDim; n0 += WY_CUBE_CHUNK) {
+      const uint32_t nCur = (nDim - n0) < WY_CUBE_CHUNK ? (nDim - n0) : WY_CUBE_CHUNK;
+      if (nCur != applyShapeN_) {
+        mmApplyW_.SetOrgShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        mmApplyW_.SetSingleShape(WY_CUBE_CHUNK, static_cast<int>(nCur), WY_CUBE_CHUNK);
+        applyShapeN_ = nCur;
+      }
+      mmApplyW_.SetTensorA(tUbHalf, false);
+      mmApplyW_.SetTensorB(bUb[n0], false);
+      mmApplyW_.IterateAll(floatScratch);
+      PipeBarrier<PIPE_ALL>();
+      Adds(rUb[n0], floatScratch, 0.0f, static_cast<uint64_t>(nCur), WY_CUBE_CHUNK,
+           {1, 1, static_cast<uint8_t>(bLda * sizeof(float) / 32),
+            static_cast<uint8_t>(nCur * sizeof(float) / 32)});
+      PipeBarrier<PIPE_V>();
     }
-    mmApplyW_.SetTensorA(tUbHalf, false);
-    mmApplyW_.SetTensorB(bUb, false);
-    mmApplyW_.IterateAll(rUb);
-    PipeBarrier<PIPE_ALL>();
   }
 
   // T = T + P @ T (64x64), operands fed straight from UB: aUb holds half(P),
