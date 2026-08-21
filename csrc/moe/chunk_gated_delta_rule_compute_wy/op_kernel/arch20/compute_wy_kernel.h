@@ -115,6 +115,9 @@ class KernelComputeWy {
     pipe_->InitBuffer(qHalfBuf_, qHalfElems * sizeof(half));
     pipe_->InitBuffer(halfBuf_, FIXED_CHUNK_SIZE * maxAlign * sizeof(half));
     pipe_->InitBuffer(rhsBuf_, FIXED_CHUNK_SIZE * maxAlign * sizeof(float));
+    // Dedicated output staging: W/U casts land here so their MTE3 stores drain
+    // underneath the next phase instead of serializing on halfBuf_.
+    pipe_->InitBuffer(storeBuf_, FIXED_CHUNK_SIZE * maxAlign * sizeof(half));
     pipe_->InitBuffer(attnBuf_, ATTEN_ELEMS * sizeof(float));
     // +8 floats: slot FIXED_CHUNK_SIZE holds the Lambda mask sentinel (see BuildLambdaTable).
     pipe_->InitBuffer(gBuf_, (FIXED_CHUNK_SIZE + 8) * sizeof(float));
@@ -625,9 +628,11 @@ class KernelComputeWy {
     } else {
       cubeGemm_.GemmApplyReplace(rhs, qHalf[ATTEN_ELEMS], halfLocal, scratch, vHeadDim_, alignV_, /*useU=*/true);
     }
-    Cast(halfLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
+    // storeBuf may still be feeding the W store (MTE3 reads) — order the U cast.
+    SyncEvent<HardEvent::MTE3_V>(HardEvent::MTE3_V);
+    Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
     SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
-    StoreBhtdChunk(uKernelGm_, halfLocal, b, vHeadIdx, tokenStart, vNumHead_, vHeadDim_, alignV_);
+    StoreBhtdChunk(uKernelGm_, storeLocal, b, vHeadIdx, tokenStart, vNumHead_, vHeadDim_, alignV_);
     SyncEvent<HardEvent::MTE3_MTE2>(HardEvent::MTE3_MTE2);
 
     if ((vHeadIdx % headGroups_) == 0) {
@@ -646,7 +651,7 @@ class KernelComputeWy {
   GlobalTensor<float> gGm_, gKernelGm_;
   WyCubeGemm cubeGemm_;
   TBuf<TPosition::VECCALC> halfBuf_, qHalfBuf_, rhsBuf_, attnBuf_, gBuf_,
-      expGBuf_, tmpBuf_, rowBuf_, negABuf_, lamOffBuf_, gOffBuf_, betaOffBuf_, lane0OffBuf_, betaHalfBuf_, mmLocalWsBuf_;
+      expGBuf_, tmpBuf_, rowBuf_, negABuf_, lamOffBuf_, gOffBuf_, betaOffBuf_, lane0OffBuf_, betaHalfBuf_, storeBuf_, mmLocalWsBuf_;
 };
 
 }  // namespace ChunkGatedDeltaRuleComputeWy
