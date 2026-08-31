@@ -545,7 +545,8 @@ class KernelComputeWy {
   // T-build applies is halfLocal reinterpreted as float (K half is dead by now);
   // qHalf[0:4096] stages P uploads, qHalf[4096:8192] stages T's B-operand halves.
   __aicore__ inline void BuildT(LocalTensor<float> attnLocal, LocalTensor<float> tOut,
-                                LocalTensor<float> cScratch, LocalTensor<half> pHalf, LocalTensor<half> tHalf) {
+                                LocalTensor<float> cScratch, LocalTensor<half> pHalf, LocalTensor<half> tHalf,
+                                LocalTensor<float> redScratch) {
     Duplicate(tOut, 0.0f, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
     SyncEvent<HardEvent::V_S>(HardEvent::V_S);
@@ -567,6 +568,16 @@ class KernelComputeWy {
       if (round + 1 < DOUBLING_ROUNDS) {
         cubeGemm_.GemmSquare(attnLocal, pHalf);
         SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+        // P == 0 exactly ⇒ every remaining doubling factor is I — stop. On
+        // real data g decays, so A^(2^k) underflows to exact zero within a few
+        // rounds; the check costs two vector ops + one scalar read.
+        Abs(cScratch, attnLocal, ATTEN_ELEMS);
+        PipeBarrier<PIPE_V>();
+        ReduceMax(redScratch, cScratch, redScratch[8], ATTEN_ELEMS, /*calIndex=*/false);
+        SyncEvent<HardEvent::V_S>(HardEvent::V_S);
+        if (redScratch.GetValue(0) == 0.0f) {
+          break;
+        }
       }
     }
     // Keep half(T) resident in UB (tHalf); both RHS applies read it directly.
@@ -636,7 +647,7 @@ class KernelComputeWy {
     // the gram) is the reinterpreted C scratch; qHalf hosts both half stagings.
     LocalTensor<float> cScratch = halfLocal.template ReinterpretCast<float>();
     if (!useFp32ForwardSubstitution) {
-      BuildT(attnLocal, scratch, cScratch, qHalf, qHalf[ATTEN_ELEMS]);
+      BuildT(attnLocal, scratch, cScratch, qHalf, qHalf[ATTEN_ELEMS], gLocal);
     }
     // STAGECUT_3_gate_buildT
 
