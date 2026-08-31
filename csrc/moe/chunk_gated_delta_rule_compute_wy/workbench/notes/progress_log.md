@@ -124,3 +124,11 @@ from prior failed builds — filter by date.
 - WyMicroMm implemented (compute_wy_micro_mm.h): A1/B1/A2/B2/CO1 TBufs, event chain V_MTE3/MTE3_MTE1/MTE1_M/M_V/V_M.
 - mm1 = micro-mm wired into T-updates only (5 calls/task). Iterating: layout-cos bugs expected before green.
 - Unknowns from recipe: UB->L1 executing pipe (assumed MTE3), LoadData3D defaults (avoided: using load2d).
+
+## 2026-08-31 15:10: ALL-GREEN MICRO KERNEL — 4.3x — ON PR
+- mm9: AXIS4 PASS all 9 (K<128 shapes on lib gram at 0.9995; all 128-dim shapes exactly 1.0).
+- Canonical quiet ~1071-1100us = 4.3x vs 4691 baseline. All 14 cube calls hand-rolled (WyMicroMm).
+- Bug ledger for micro path: cross-call M_MTE1+MTE1_MTE3; V_MTE2 WAW before V-load; MTE3_V before storeBuf NZ reuse;
+  K<128 gram stays on lib (micro-gram rounding shifts gate boundary on weak-decay data).
+- PR 13122 head updated (squash, ~4.3x claim). Next: drop lib for 128-dim path? (lib still used K<128 gram + Init),
+  vector cuts (half-domain front, NZ-resident doubling) toward 800.

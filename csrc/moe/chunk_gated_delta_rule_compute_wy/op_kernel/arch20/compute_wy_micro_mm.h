@@ -88,6 +88,82 @@ class WyMicroMm {
     Evt<HardEvent::V_M>();
   }
 
+  // 64^3 call with every tensor already in NZ layout (half A/B in UB, fp32 C
+  // straight from CO1 into cNzOut — no ND conversion anywhere): staging is one
+  // contiguous 8KB copy per operand, readback one matrix-block copy.
+  __aicore__ inline void MmNz(LocalTensor<float> cNzOut, LocalTensor<half> aNzHalf, LocalTensor<half> bNzHalf) {
+    LocalTensor<half> l1A = l1ABuf_.Get<half>();
+    LocalTensor<half> l1B = l1BBuf_.Get<half>();
+    LocalTensor<half> l0A = l0ABuf_.Get<half>();
+    LocalTensor<half> l0B = l0BBuf_.Get<half>();
+    LocalTensor<float> co = coBuf_.Get<float>();
+    Evt<HardEvent::V_MTE3>();
+    Evt<HardEvent::MTE1_MTE3>();
+    DataCopy(l1A, aNzHalf, 64 * 64);
+    DataCopy(l1B, bNzHalf, 64 * 64);
+    Evt<HardEvent::MTE3_MTE1>();
+    Evt<HardEvent::M_MTE1>();
+    LoadData2dParams pa(0, 4, 4, 0, 0, false, 0);
+    for (uint32_t i = 0; i < 4; ++i) {
+      LoadData(l0A[i * 4 * 256], l1A[i * 256], pa);
+    }
+    LoadData2dParams pb(0, 4, 4, 0, 0, true, 0);
+    for (uint32_t i = 0; i < 4; ++i) {
+      LoadData(l0B[i * 4 * 256], l1B[i * 256], pb);
+    }
+    Evt<HardEvent::MTE1_M>();
+    MmadParams mp(64, 64, 64, 0, false, true);
+    Mmad(co, l0A, l0B, mp);
+    Evt<HardEvent::M_V>();
+    DataCopyEnhancedParams enh;
+    enh.blockMode = BlockMode::BLOCK_MODE_MATRIX;
+    DataCopy(cNzOut, co, {4, 4, 0, 0}, enh);
+    PipeBarrier<PIPE_V>();
+    Evt<HardEvent::V_M>();
+  }
+
+  // Solve variant with the A operand already NZ (half): one contiguous staging
+  // copy for A; B stays ND.
+  __aicore__ inline void MmANz(LocalTensor<float> cUb, LocalTensor<half> aNzHalf, LocalTensor<half> bUb,
+                               LocalTensor<float> cNz, uint32_t n, uint32_t ldc) {
+    LocalTensor<half> l1A = l1ABuf_.Get<half>();
+    LocalTensor<half> l1B = l1BBuf_.Get<half>();
+    LocalTensor<half> l0A = l0ABuf_.Get<half>();
+    LocalTensor<half> l0B = l0BBuf_.Get<half>();
+    LocalTensor<float> co = coBuf_.Get<float>();
+    const uint16_t n1 = static_cast<uint16_t>(n / 16);
+    Evt<HardEvent::V_MTE3>();
+    Evt<HardEvent::MTE1_MTE3>();
+    DataCopy(l1A, aNzHalf, 64 * 64);
+    for (uint32_t j = 0; j < n1; ++j) {
+      DataCopy(l1B[j * 64 * 16], bUb[j * 16], {64, 1, static_cast<uint16_t>(n1 - 1), 0});
+    }
+    Evt<HardEvent::MTE3_MTE1>();
+    Evt<HardEvent::M_MTE1>();
+    LoadData2dParams pa(0, 4, 4, 0, 0, false, 0);
+    for (uint32_t i = 0; i < 4; ++i) {
+      LoadData(l0A[i * 4 * 256], l1A[i * 256], pa);
+    }
+    LoadData2dParams pb(0, static_cast<uint8_t>(n1), 4, 0, 0, true, 0);
+    for (uint32_t i = 0; i < 4; ++i) {
+      LoadData(l0B[i * n1 * 256], l1B[i * 256], pb);
+    }
+    Evt<HardEvent::MTE1_M>();
+    MmadParams mp(64, static_cast<uint16_t>(n), 64, 0, false, true);
+    Mmad(co, l0A, l0B, mp);
+    Evt<HardEvent::M_V>();
+    DataCopyEnhancedParams enh;
+    enh.blockMode = BlockMode::BLOCK_MODE_MATRIX;
+    DataCopy(cNz, co, {n1, 4, 0, 0}, enh);
+    PipeBarrier<PIPE_V>();
+    for (uint32_t j = 0; j < n1; ++j) {
+      Muls(cUb[j * 16], cNz[j * 64 * 16], 1.0f, static_cast<uint64_t>(16), 64,
+           {1, 1, static_cast<uint8_t>(ldc * sizeof(float) / 32), 2});
+    }
+    PipeBarrier<PIPE_V>();
+    Evt<HardEvent::V_M>();
+  }
+
   // C[64,64] fp32 = A[64,kDim] @ B[64,kDim]^T, accumulated over 64-wide K
   // slices IN L0C (one readback total). A/B are ND in UB with row strides
   // aLda/bLda. For A@B^T the per-fractal LoadData transpose cancels the matrix

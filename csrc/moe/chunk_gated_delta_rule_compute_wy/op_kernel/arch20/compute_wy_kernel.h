@@ -549,36 +549,43 @@ class KernelComputeWy {
   __aicore__ inline void BuildT(LocalTensor<float> attnLocal, LocalTensor<float> tOut,
                                 LocalTensor<float> cScratch, LocalTensor<half> pHalf, LocalTensor<half> tHalf,
                                 LocalTensor<float> cNz) {
-    Duplicate(tOut, 0.0f, ATTEN_ELEMS);
+    (void)cNz;
+    // NZ-resident doubling: A is converted to NZ once; P, T, casts and cube
+    // C's all stay NZ (elementwise ops are layout-agnostic), so no per-round
+    // conversions and single contiguous L1 stagings. tHalf leaves this
+    // function in NZ — the solves stage it with MmANz.
+    for (uint32_t j = 0; j < 4; ++j) {
+      Muls(tOut[j * 64 * 16], attnLocal[j * 16], 1.0f, static_cast<uint64_t>(16), 64, {1, 1, 2, 8});
+    }
+    PipeBarrier<PIPE_V>();
+    Adds(attnLocal, tOut, 0.0f, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
     SyncEvent<HardEvent::V_S>(HardEvent::V_S);
     for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
-      tOut.SetValue(i * FIXED_CHUNK_SIZE + i, 1.0f);
+      // I on the NZ diagonal (A's diagonal is strictly zero, so set not add).
+      tOut.SetValue((i / 16) * 1024 + i * 16 + (i % 16), 1.0f);
     }
     SyncEvent<HardEvent::S_V>(HardEvent::S_V);
-    // Round 0 is T = I + A — a pure vector add (T was just seeded with I).
-    Add(tOut, tOut, attnLocal, ATTEN_ELEMS);
-    PipeBarrier<PIPE_V>();
+    // Round 0's T-update is T = I + A, already materialized above; square P.
     Cast(pHalf, attnLocal, RoundMode::CAST_NONE, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
-    microMm_.Mm(attnLocal, pHalf, pHalf, cNz, FIXED_CHUNK_SIZE);
+    microMm_.MmNz(attnLocal, pHalf, pHalf);
     for (uint32_t round = 1; round < DOUBLING_ROUNDS; ++round) {
-      // T-update on the hand-rolled cube path: C = P @ T, then T += C.
       Cast(pHalf, attnLocal, RoundMode::CAST_NONE, ATTEN_ELEMS);
       Cast(tHalf, tOut, RoundMode::CAST_NONE, ATTEN_ELEMS);
       PipeBarrier<PIPE_V>();
-      microMm_.Mm(cScratch, pHalf, tHalf, cNz, FIXED_CHUNK_SIZE);
+      microMm_.MmNz(cScratch, pHalf, tHalf);
       Add(tOut, tOut, cScratch, ATTEN_ELEMS);
       PipeBarrier<PIPE_V>();
       if (round + 1 < DOUBLING_ROUNDS) {
-        // P = P @ P on the micro path; C lands straight in attnLocal.
-        microMm_.Mm(attnLocal, pHalf, pHalf, cNz, FIXED_CHUNK_SIZE);
+        microMm_.MmNz(attnLocal, pHalf, pHalf);
       }
     }
-    // Keep half(T) resident in UB (tHalf); both RHS applies read it directly.
+    // Keep half(T) resident in UB (tHalf, NZ); both RHS applies read it.
     Cast(tHalf, tOut, RoundMode::CAST_NONE, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
   }
+
 
   __aicore__ inline void ProcessOneTask(uint32_t b, uint32_t kHeadIdx, uint32_t vHeadIdx, uint32_t chunkIdx) {
     const uint32_t tokenStart = chunkIdx * FIXED_CHUNK_SIZE;
@@ -665,7 +672,7 @@ class KernelComputeWy {
       for (uint32_t n0 = 0; n0 < kHeadDim_; n0 += FIXED_CHUNK_SIZE) {
         const uint32_t nCur = (kHeadDim_ - n0) < FIXED_CHUNK_SIZE ? (kHeadDim_ - n0) : FIXED_CHUNK_SIZE;
         CastFloatRowsToHalfSized(halfLocal, rhs[n0], FIXED_CHUNK_SIZE, nCur, alignK_);
-        microMm_.Mm(rhs[n0], qHalf[ATTEN_ELEMS], halfLocal, wNz, nCur, alignK_);
+        microMm_.MmANz(rhs[n0], qHalf[ATTEN_ELEMS], halfLocal, wNz, nCur, alignK_);
       }
     }
     // Kick the V load immediately (halfLocal is free once the W solve consumed
@@ -717,7 +724,7 @@ class KernelComputeWy {
           PipeBarrier<PIPE_V>();
           bFeedU = qHalf;
         }
-        microMm_.Mm(rhs[n0], qHalf[ATTEN_ELEMS], bFeedU, uNz, nCur, alignV_);
+        microMm_.MmANz(rhs[n0], qHalf[ATTEN_ELEMS], bFeedU, uNz, nCur, alignV_);
       }
       SyncEvent<HardEvent::MTE3_V>(HardEvent::MTE3_V);
       Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
