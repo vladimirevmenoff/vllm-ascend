@@ -20,18 +20,14 @@ using WyMmBTransType = MatmulType<TPosition::GM, CubeFormat::ND, half, true>;
 using WyMmCType = MatmulType<TPosition::VECCALC, CubeFormat::ND, float>;
 using WyMmBiasType = MatmulType<TPosition::VECCALC, CubeFormat::ND, float>;
 
-// Compile-time basic-block config: every cube call here is a fixed 64-tile
-// problem, so the runtime tiling/iteration machinery (the bulk of per-call
-// latency on m200) can be stripped.
-constexpr MatmulConfig WY_CFG_BASIC = GetBasicConfig(64, 64, 64);
-using WyMatmulNoTrans = matmul::MatmulImpl<WyMmAType, WyMmBType, WyMmCType, WyMmBiasType, WY_CFG_BASIC>;
+using WyMatmulNoTrans = matmul::MatmulImpl<WyMmAType, WyMmBType, WyMmCType, WyMmBiasType>;
 using WyMatmulBTrans = matmul::MatmulImpl<WyMmAType, WyMmBTransType, WyMmCType, WyMmBiasType>;
 // Apply matmuls read A/B straight from UB — no UB->GM->L1 staging round-trip.
 using WyMmAUbType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, false>;
 using WyMmBUbType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, false>;
-using WyMatmulApplyUb = matmul::MatmulImpl<WyMmAUbType, WyMmBUbType, WyMmCType, WyMmBiasType, WY_CFG_BASIC>;
+using WyMatmulApplyUb = matmul::MatmulImpl<WyMmAUbType, WyMmBUbType, WyMmCType, WyMmBiasType>;
 using WyMmBUbTransType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, true>;
-using WyMatmulBTransUb = matmul::MatmulImpl<WyMmAUbType, WyMmBUbTransType, WyMmCType, WyMmBiasType, WY_CFG_BASIC>;
+using WyMatmulBTransUb = matmul::MatmulImpl<WyMmAUbType, WyMmBUbTransType, WyMmCType, WyMmBiasType>;
 // (half-C UB output wedges the 310P cube — aicore timeout; keep C fp32)
 
 // GM staging: A_half(64*MAX_HEAD) + B_half(64*MAX_HEAD). Cube writes C directly to UB.
