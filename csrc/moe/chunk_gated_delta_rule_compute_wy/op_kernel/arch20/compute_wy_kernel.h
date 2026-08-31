@@ -662,9 +662,12 @@ class KernelComputeWy {
     // the V load below then overlaps the whole doubling loop.
     LocalTensor<float> cScratch = storeBuf_.Get<half>().ReinterpretCast<float>();
     // Kick the V load now: halfLocal (K) is dead after the gram, and the MTE2
-    // transfer hides under the whole doubling loop.
-    SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
-    LoadBthdChunk(vGm_, halfLocal, b, tokenStart, vHeadIdx, vNumHead_, vHeadDim_, alignV_);
+    // transfer hides under the whole doubling loop. Only on the all-micro
+    // 128-dim path — the small-dim library-gram flow regresses with it.
+    if (kHeadDim_ >= 128) {
+      SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
+      LoadBthdChunk(vGm_, halfLocal, b, tokenStart, vHeadIdx, vNumHead_, vHeadDim_, alignV_);
+    }
     if (!useFp32ForwardSubstitution) {
       BuildT(attnLocal, scratch, cScratch, qHalf, qHalf[ATTEN_ELEMS], cScratch);
     }
@@ -684,6 +687,10 @@ class KernelComputeWy {
       }
     }
     LocalTensor<half> storeLocal = storeBuf_.Get<half>();
+    if (kHeadDim_ < 128) {
+      SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
+      LoadBthdChunk(vGm_, halfLocal, b, tokenStart, vHeadIdx, vNumHead_, vHeadDim_, alignV_);
+    }
     Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkKElems_);
     SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     StoreBhtdChunk(wKernelGm_, storeLocal, b, vHeadIdx, tokenStart, vNumHead_, kHeadDim_, alignK_);
