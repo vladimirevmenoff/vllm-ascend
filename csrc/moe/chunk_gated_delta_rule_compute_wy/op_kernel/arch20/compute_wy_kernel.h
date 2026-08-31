@@ -658,9 +658,11 @@ class KernelComputeWy {
     // ---- Build T = (I−A)⁻¹ once (skipped on the fp32 fallback path, which
     // consumes A directly). tmpBuf holds T fp32; halfLocal (K half, dead after
     // the gram) is the reinterpreted C scratch; qHalf hosts both half stagings.
-    // C scratch lives in storeBuf so halfLocal is free right after the gram —
-    // the V load below then overlaps the whole doubling loop.
-    LocalTensor<float> cScratch = storeBuf_.Get<half>().ReinterpretCast<float>();
+    // On the 128-dim all-micro path the C scratch lives in storeBuf so
+    // halfLocal is free right after the gram and the V load overlaps the
+    // doubling loop; the small-dim library-gram flow keeps the old layout.
+    LocalTensor<float> cScratch = kHeadDim_ >= 128 ? storeBuf_.Get<half>().ReinterpretCast<float>()
+                                                   : halfLocal.template ReinterpretCast<float>();
     // Kick the V load now: halfLocal (K) is dead after the gram, and the MTE2
     // transfer hides under the whole doubling loop. Only on the all-micro
     // 128-dim path — the small-dim library-gram flow regresses with it.
@@ -682,8 +684,9 @@ class KernelComputeWy {
       LocalTensor<float> wNz = storeBuf_.Get<half>().ReinterpretCast<float>();
       for (uint32_t n0 = 0; n0 < kHeadDim_; n0 += FIXED_CHUNK_SIZE) {
         const uint32_t nCur = (kHeadDim_ - n0) < FIXED_CHUNK_SIZE ? (kHeadDim_ - n0) : FIXED_CHUNK_SIZE;
-        CastFloatRowsToHalfSized(qHalf, rhs[n0], FIXED_CHUNK_SIZE, nCur, alignK_);
-        microMm_.MmANz(rhs[n0], qHalf[ATTEN_ELEMS], qHalf, wNz, nCur, alignK_);
+        LocalTensor<half> wB = kHeadDim_ >= 128 ? qHalf : halfLocal;
+        CastFloatRowsToHalfSized(wB, rhs[n0], FIXED_CHUNK_SIZE, nCur, alignK_);
+        microMm_.MmANz(rhs[n0], qHalf[ATTEN_ELEMS], wB, wNz, nCur, alignK_);
       }
     }
     LocalTensor<half> storeLocal = storeBuf_.Get<half>();
