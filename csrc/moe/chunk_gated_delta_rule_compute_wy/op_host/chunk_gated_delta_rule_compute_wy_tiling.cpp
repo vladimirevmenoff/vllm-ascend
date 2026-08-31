@@ -112,8 +112,8 @@ ge::graphStatus Tiling4ChunkGatedDeltaRuleComputeWy(gert::TilingContext *context
     // wedge MatmulImpl::Init on the device (bisected: Init alone hangs at K=128),
     // so every tiling is generated for the 64^3 tile.
     // mmAttn: kBeta[64,<=64] @ K[64,<=64]^T -> [64,64], K-slices accumulated in UB.
-    if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, FIXED_CHUNK, /*bTranspose=*/true, tiling.mmAttn) !=
-        ge::GRAPH_SUCCESS) {
+    if (FillCubeTiling(context, FIXED_CHUNK, FIXED_CHUNK, FIXED_CHUNK, /*bTranspose=*/true, tiling.mmAttn,
+                       /*abFromUb=*/true) != ge::GRAPH_SUCCESS) {
         return ge::GRAPH_FAILED;
     }
     // mmSquare: P[64,64] @ P[64,64] -> [64,64]

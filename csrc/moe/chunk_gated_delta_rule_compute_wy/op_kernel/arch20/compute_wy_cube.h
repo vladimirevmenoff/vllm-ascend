@@ -22,6 +22,8 @@ using WyMmBiasType = MatmulType<TPosition::VECCALC, CubeFormat::ND, float>;
 
 using WyMatmulNoTrans = matmul::MatmulImpl<WyMmAType, WyMmBType, WyMmCType, WyMmBiasType>;
 using WyMatmulBTrans = matmul::MatmulImpl<WyMmAType, WyMmBTransType, WyMmCType, WyMmBiasType>;
+using WyMmBUbTransType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, true>;
+using WyMatmulBTransUb = matmul::MatmulImpl<WyMmAUbType, WyMmBUbTransType, WyMmCType, WyMmBiasType>;
 // Apply matmuls read A/B straight from UB — no UB->GM->L1 staging round-trip.
 using WyMmAUbType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, false>;
 using WyMmBUbType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, false>;
@@ -99,25 +101,36 @@ class WyCubeGemm {
   // K is split into <=64 slices and accumulated in UB: on 310P a gram matmul whose inner
   // K exceeds 64 (i.e. needs more than one K iteration) hangs the AI core (aicore timeout).
   __aicore__ inline void GemmATransB(LocalTensor<float> cUb, const LocalTensor<half> aUb, const LocalTensor<half> bUb,
-                                     LocalTensor<float> accScratch, uint32_t kDim, uint32_t aLda, uint32_t bLda)
+                                     LocalTensor<float> accScratch, LocalTensor<half> halfScratch, uint32_t kDim,
+                                     uint32_t aLda, uint32_t bLda)
   {
     // Each K slice is restaged contiguously so no cube call — including its
     // OrgShape strides — ever sees a dimension above 64 (128 hangs the aicore).
     for (uint32_t k0 = 0; k0 < kDim; k0 += WY_CUBE_CHUNK) {
       const uint32_t kCur = (kDim - k0) < WY_CUBE_CHUNK ? (kDim - k0) : WY_CUBE_CHUNK;
+      // UB-fed: K slices are compact-copied inside UB (halfScratch) instead of
+      // round-tripping through the GM staging buffers.
+      LocalTensor<half> aFeed = aUb;
+      LocalTensor<half> bFeed = bUb;
+      if (!(k0 == 0 && aLda == kCur)) {
+        Muls(halfScratch, aUb[k0], static_cast<half>(1), static_cast<uint64_t>(kCur), WY_CUBE_CHUNK,
+             {1, 1, static_cast<uint8_t>(kCur * sizeof(half) / 32), static_cast<uint8_t>(aLda * sizeof(half) / 32)});
+        aFeed = halfScratch;
+      }
+      if (!(k0 == 0 && bLda == kCur)) {
+        Muls(halfScratch[WY_CUBE_CHUNK * WY_CUBE_CHUNK], bUb[k0], static_cast<half>(1), static_cast<uint64_t>(kCur),
+             WY_CUBE_CHUNK,
+             {1, 1, static_cast<uint8_t>(kCur * sizeof(half) / 32), static_cast<uint8_t>(bLda * sizeof(half) / 32)});
+        bFeed = halfScratch[WY_CUBE_CHUNK * WY_CUBE_CHUNK];
+      }
+      PipeBarrier<PIPE_V>();
       WaitVToMte3();
-      CopyHalfRowsToGm(aGm_, aUb[k0], WY_CUBE_CHUNK, kCur, aLda);
-      CopyHalfRowsToGm(bGm_, bUb[k0], WY_CUBE_CHUNK, kCur, bLda);
-      WaitMte3ToMte2();
-
-      // Re-configuring shapes between IterateAll calls wedges the 310P matmul;
-      // full 64-slices keep Init's 64^3 config untouched.
       if (kCur != WY_CUBE_CHUNK) {
         mmAttn_.SetOrgShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kCur));
         mmAttn_.SetSingleShape(WY_CUBE_CHUNK, WY_CUBE_CHUNK, static_cast<int>(kCur));
       }
-      mmAttn_.SetTensorA(aGm_, false);
-      mmAttn_.SetTensorB(bGm_, true);
+      mmAttn_.SetTensorA(aFeed, false);
+      mmAttn_.SetTensorB(bFeed, true);
       if (k0 == 0) {
         mmAttn_.IterateAll(cUb);
       } else {
@@ -316,7 +329,7 @@ class WyCubeGemm {
   uint32_t perCoreBytes_{0};
   uint32_t usedCoreNum_{1};
   LocalTensor<uint8_t> localWs_;
-  WyMatmulBTrans mmAttn_;
+  WyMatmulBTransUb mmAttn_;
   WyMatmulNoTrans mmSquare_;
   WyMatmulApplyUb mmApplyU_;
   WyMatmulApplyUb mmApplyW_;
