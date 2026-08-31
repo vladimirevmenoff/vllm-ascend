@@ -691,6 +691,9 @@ class KernelComputeWy {
       BroadcastMulRowsHalf(halfLocal, halfLocal, betaHalfVec, brcbHalf, FIXED_CHUNK_SIZE, vHeadDim_, alignV_,
                            alignV_);
       LocalTensor<float> uNz = storeBuf_.Get<half>().ReinterpretCast<float>();
+      // storeBuf may still be feeding the W store (MTE3 reads) — the micro
+      // path writes its NZ scratch there on V, so order it explicitly.
+      SyncEvent<HardEvent::MTE3_V>(HardEvent::MTE3_V);
       for (uint32_t n0 = 0; n0 < vHeadDim_; n0 += FIXED_CHUNK_SIZE) {
         const uint32_t nCur = (vHeadDim_ - n0) < FIXED_CHUNK_SIZE ? (vHeadDim_ - n0) : FIXED_CHUNK_SIZE;
         LocalTensor<half> bFeedU = halfLocal;
