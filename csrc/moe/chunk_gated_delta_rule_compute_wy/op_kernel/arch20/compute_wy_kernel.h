@@ -661,6 +661,10 @@ class KernelComputeWy {
     }
     // Kick the V load immediately (halfLocal is free once the W solve consumed
     // its stagings); the W store drains from storeBuf under the whole U phase.
+    // V_MTE2: the W solve's B-casts wrote halfLocal on V — without this the
+    // MTE2 load can land FIRST and get overwritten by the stale cast (WAW
+    // across queues; the old library call's trailing PIPE_ALL hid it).
+    SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
     LocalTensor<half> storeLocal = storeBuf_.Get<half>();
     LoadBthdChunk(vGm_, halfLocal, b, tokenStart, vHeadIdx, vNumHead_, vHeadDim_, alignV_);
     Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkKElems_);
