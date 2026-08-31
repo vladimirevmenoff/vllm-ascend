@@ -125,7 +125,7 @@ class WyMicroMm {
   // Solve variant with the A operand already NZ (half): one contiguous staging
   // copy for A; B stays ND.
   __aicore__ inline void MmANz(LocalTensor<float> cUb, LocalTensor<half> aNzHalf, LocalTensor<half> bUb,
-                               LocalTensor<float> cNz, uint32_t n, uint32_t ldc) {
+                               LocalTensor<float> cNz, uint32_t n, uint32_t ldc, uint32_t bLda) {
     LocalTensor<half> l1A = l1ABuf_.Get<half>();
     LocalTensor<half> l1B = l1BBuf_.Get<half>();
     LocalTensor<half> l0A = l0ABuf_.Get<half>();
@@ -136,7 +136,7 @@ class WyMicroMm {
     Evt<HardEvent::MTE1_MTE3>();
     DataCopy(l1A, aNzHalf, 64 * 64);
     for (uint32_t j = 0; j < n1; ++j) {
-      DataCopy(l1B[j * 64 * 16], bUb[j * 16], {64, 1, static_cast<uint16_t>(n1 - 1), 0});
+      DataCopy(l1B[j * 64 * 16], bUb[j * 16], {64, 1, static_cast<uint16_t>(bLda / 16 - 1), 0});
     }
     Evt<HardEvent::MTE3_MTE1>();
     Evt<HardEvent::M_MTE1>();
