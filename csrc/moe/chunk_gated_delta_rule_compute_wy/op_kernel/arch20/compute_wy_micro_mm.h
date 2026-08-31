@@ -43,7 +43,10 @@ class WyMicroMm {
     const uint16_t n1 = static_cast<uint16_t>(n / 16);
     // A/B were produced on V; the L1 staging below reads them. UB->L1 nd2nz:
     // one DataCopy per 16-column fractal, all 64 rows land contiguously.
+    // MTE1_MTE3: the previous call's LoadData must be done reading L1 before
+    // this call's staging overwrites it (back-to-back calls race otherwise).
     Evt<HardEvent::V_MTE3>();
+    Evt<HardEvent::MTE1_MTE3>();
     for (uint32_t j = 0; j < 4; ++j) {
       DataCopy(l1A[j * 64 * 16], aUb[j * 16], {64, 1, 3, 0});
     }
@@ -51,6 +54,9 @@ class WyMicroMm {
       DataCopy(l1B[j * 64 * 16], bUb[j * 16], {64, 1, static_cast<uint16_t>(n1 - 1), 0});
     }
     Evt<HardEvent::MTE3_MTE1>();
+    // M_MTE1: the previous call's Mmad must be done reading L0A/L0B before the
+    // loads below overwrite them.
+    Evt<HardEvent::M_MTE1>();
     // L1(NZ) -> L0A (Zz): each m-fractal-row gathers its 4 k-fractals.
     LoadData2dParams pa(0, 4, 4, 0, 0, false, 0);
     for (uint32_t i = 0; i < 4; ++i) {
