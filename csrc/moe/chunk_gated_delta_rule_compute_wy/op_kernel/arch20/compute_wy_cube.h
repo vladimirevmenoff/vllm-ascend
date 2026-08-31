@@ -29,8 +29,7 @@ using WyMatmulBTrans = matmul::MatmulImpl<WyMmAType, WyMmBTransType, WyMmCType, 
 // Apply matmuls read A/B straight from UB — no UB->GM->L1 staging round-trip.
 using WyMmAUbType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, false>;
 using WyMmBUbType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, false>;
-// (basic-block also fails to compile for plain UB-fed inputs — GM inputs only)
-using WyMatmulApplyUb = matmul::MatmulImpl<WyMmAUbType, WyMmBUbType, WyMmCType, WyMmBiasType>;
+using WyMatmulApplyUb = matmul::MatmulImpl<WyMmAUbType, WyMmBUbType, WyMmCType, WyMmBiasType, WY_CFG_BASIC>;
 using WyMmBUbTransType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, true>;
 using WyMatmulBTransUb = matmul::MatmulImpl<WyMmAUbType, WyMmBUbTransType, WyMmCType, WyMmBiasType, WY_CFG_BASIC>;
 // (half-C UB output wedges the 310P cube — aicore timeout; keep C fp32)
