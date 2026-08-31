@@ -608,18 +608,19 @@ class KernelComputeWy {
     LoadBetaChunk(betaLocal, qHalf, FIXED_CHUNK_SIZE * maxAlign_, b, tokenStart, vHeadIdx);
     for (uint32_t k0 = 0; k0 < kHeadDim_; k0 += FIXED_CHUNK_SIZE) {
       const uint32_t kCur = (kHeadDim_ - k0) < FIXED_CHUNK_SIZE ? (kHeadDim_ - k0) : FIXED_CHUNK_SIZE;
-      // MTE2 write below races prior V work on halfLocal without this.
+      // MTE2 write below races prior V work on halfLocal/scratch without this.
       SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
       LoadBthdChunkSlice(kGm_, halfLocal, b, tokenStart, kHeadIdx, kNumHead_, kHeadDim_, alignK_, k0, kCur);
-    }
-    SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
-    // βK stays in the half domain: one row-broadcast over the loaded K block.
-    {
-      LocalTensor<half> betaHalfVec = betaHalfBuf_.Get<half>();
-      Cast(betaHalfVec, betaLocal, RoundMode::CAST_NONE, FIXED_CHUNK_SIZE);
+      SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+      // One strided Cast (dst rows lda=64 fp32, src rows lda=alignK half):
+      // replaces 64 scalar-issued per-row Casts — the biggest scalar-issue sink.
+      Cast(scratch, halfLocal[k0], RoundMode::CAST_NONE, static_cast<uint64_t>(kCur), FIXED_CHUNK_SIZE,
+           {1, 1, static_cast<uint8_t>(FIXED_CHUNK_SIZE * sizeof(float) / BLOCK_BYTES),
+            static_cast<uint8_t>(alignK_ * sizeof(half) / BLOCK_BYTES)});
       PipeBarrier<PIPE_V>();
-      BroadcastMulRowsHalf(qHalf, halfLocal, betaHalfVec, scratch.template ReinterpretCast<half>(),
-                           FIXED_CHUNK_SIZE, kHeadDim_, kHeadDim_, alignK_);
+      // attnLocal doubles as the Brcb workspace (needs 64*8 floats) while free.
+      BroadcastMulRowsFloat(rhs[k0], scratch, betaLocal, attnLocal, FIXED_CHUNK_SIZE, kCur, alignK_,
+                            FIXED_CHUNK_SIZE);
     }
     // reduceScratch holds gRaw; attnLocal is the g-load scratch
     // (Hv<=64 ⇒ FIXED_CHUNK*Hv <= ATTEN_ELEMS). attnLocal was just V-written
@@ -628,7 +629,8 @@ class KernelComputeWy {
     SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
     BuildCumulativeG(b, vHeadIdx, tokenStart, gLocal, expGLocal, reduceScratch, attnLocal, ATTEN_ELEMS);
 
-    // Cube: G = Kβ @ K^T → attnLocal (qHalf already holds half βK).
+    // Cube: G = Kβ @ K^T → attnLocal; then A = −strictlower(G ⊙ Λ).
+    CastFloatRowsToHalf(qHalf, rhs, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
     // halfLocal already holds the full-width K half block from the slice loads.
     if (kHeadDim_ >= 128) {
       microMm_.GramAcc(attnLocal, qHalf, halfLocal, storeBuf_.Get<half>().ReinterpretCast<float>(), kHeadDim_,
@@ -646,15 +648,7 @@ class KernelComputeWy {
     ApplyLambdaNegStrictLower(attnLocal, gLocal, scratch);
 
     // Pass-1 RHS: rhs already holds βK; apply γ = exp(a) in place → W RHS.
-    // γβK in half, parked in storeBuf: qHalf's upper half becomes T during
-    // BuildT, so the W RHS must live elsewhere until the solves consume it.
-    {
-      LocalTensor<half> gammaHalf = betaHalfBuf_.Get<half>();
-      Cast(gammaHalf, expGLocal, RoundMode::CAST_NONE, FIXED_CHUNK_SIZE);
-      PipeBarrier<PIPE_V>();
-      BroadcastMulRowsHalf(storeBuf_.Get<half>(), qHalf, gammaHalf, scratch.template ReinterpretCast<half>(),
-                           FIXED_CHUNK_SIZE, kHeadDim_, kHeadDim_, kHeadDim_);
-    }
+    BroadcastMulRowsFloat(rhs, rhs, expGLocal, scratch, FIXED_CHUNK_SIZE, kHeadDim_, alignK_, alignK_);
     // expGLocal is dead after γ was applied and can hold the 64 row sums;
     // betaLocal must survive for the pass-2 βV product.
     const bool useFp32ForwardSubstitution =
@@ -670,18 +664,15 @@ class KernelComputeWy {
 
     // ---- W = T @ (γβK), resident in rhs. halfLocal stages R halves. ----
     if (useFp32ForwardSubstitution) {
-      // Exact path wants fp32 γβK; materialize it from the half copy.
-      Cast(rhs, storeBuf_.Get<half>(), RoundMode::CAST_NONE, chunkKElems_);
-      PipeBarrier<PIPE_V>();
       Fp32ForwardSubstitution(attnLocal, rhs, kHeadDim_, alignK_);
     } else {
-      // Micro-path solve: B slices feed straight from the strided γβK half
-      // (staging handles the lda); C into the rhs slice. NZ scratch: attnBuf
-      // (A is dead after BuildT).
-      LocalTensor<float> wNz = attnLocal;
+      // Micro-path solve: per 64-wide slice, compact-cast B then C into the
+      // rhs slice (ldc = alignK). cNz scratch: storeBuf as fp32.
+      LocalTensor<float> wNz = storeBuf_.Get<half>().ReinterpretCast<float>();
       for (uint32_t n0 = 0; n0 < kHeadDim_; n0 += FIXED_CHUNK_SIZE) {
         const uint32_t nCur = (kHeadDim_ - n0) < FIXED_CHUNK_SIZE ? (kHeadDim_ - n0) : FIXED_CHUNK_SIZE;
-        microMm_.MmANz(rhs[n0], qHalf[ATTEN_ELEMS], storeBuf_.Get<half>()[n0], wNz, nCur, alignK_, kHeadDim_);
+        CastFloatRowsToHalfSized(halfLocal, rhs[n0], FIXED_CHUNK_SIZE, nCur, alignK_);
+        microMm_.MmANz(rhs[n0], qHalf[ATTEN_ELEMS], halfLocal, wNz, nCur, alignK_);
       }
     }
     // Kick the V load immediately (halfLocal is free once the W solve consumed
@@ -719,10 +710,21 @@ class KernelComputeWy {
       PipeBarrier<PIPE_V>();
       BroadcastMulRowsHalf(halfLocal, halfLocal, betaHalfVec, brcbHalf, FIXED_CHUNK_SIZE, vHeadDim_, alignV_,
                            alignV_);
-      LocalTensor<float> uNz = attnLocal;
+      LocalTensor<float> uNz = storeBuf_.Get<half>().ReinterpretCast<float>();
+      // storeBuf may still be feeding the W store (MTE3 reads) — the micro
+      // path writes its NZ scratch there on V, so order it explicitly.
+      SyncEvent<HardEvent::MTE3_V>(HardEvent::MTE3_V);
       for (uint32_t n0 = 0; n0 < vHeadDim_; n0 += FIXED_CHUNK_SIZE) {
         const uint32_t nCur = (vHeadDim_ - n0) < FIXED_CHUNK_SIZE ? (vHeadDim_ - n0) : FIXED_CHUNK_SIZE;
-        microMm_.MmANz(rhs[n0], qHalf[ATTEN_ELEMS], halfLocal[n0], uNz, nCur, alignV_, alignV_);
+        LocalTensor<half> bFeedU = halfLocal;
+        if (!(n0 == 0 && alignV_ == nCur)) {
+          Muls(qHalf, halfLocal[n0], static_cast<half>(1), static_cast<uint64_t>(nCur), FIXED_CHUNK_SIZE,
+               {1, 1, static_cast<uint8_t>(nCur * sizeof(half) / 32),
+                static_cast<uint8_t>(alignV_ * sizeof(half) / 32)});
+          PipeBarrier<PIPE_V>();
+          bFeedU = qHalf;
+        }
+        microMm_.MmANz(rhs[n0], qHalf[ATTEN_ELEMS], bFeedU, uNz, nCur, alignV_);
       }
       SyncEvent<HardEvent::MTE3_V>(HardEvent::MTE3_V);
       Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
