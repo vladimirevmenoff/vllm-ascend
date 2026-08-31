@@ -658,9 +658,15 @@ class KernelComputeWy {
     // ---- Build T = (I−A)⁻¹ once (skipped on the fp32 fallback path, which
     // consumes A directly). tmpBuf holds T fp32; halfLocal (K half, dead after
     // the gram) is the reinterpreted C scratch; qHalf hosts both half stagings.
-    LocalTensor<float> cScratch = halfLocal.template ReinterpretCast<float>();
+    // C scratch lives in storeBuf so halfLocal is free right after the gram —
+    // the V load below then overlaps the whole doubling loop.
+    LocalTensor<float> cScratch = storeBuf_.Get<half>().ReinterpretCast<float>();
+    // Kick the V load now: halfLocal (K) is dead after the gram, and the MTE2
+    // transfer hides under the whole doubling loop.
+    SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
+    LoadBthdChunk(vGm_, halfLocal, b, tokenStart, vHeadIdx, vNumHead_, vHeadDim_, alignV_);
     if (!useFp32ForwardSubstitution) {
-      BuildT(attnLocal, scratch, cScratch, qHalf, qHalf[ATTEN_ELEMS], storeBuf_.Get<half>().ReinterpretCast<float>());
+      BuildT(attnLocal, scratch, cScratch, qHalf, qHalf[ATTEN_ELEMS], cScratch);
     }
     // STAGECUT_3_gate_buildT
 
@@ -673,18 +679,11 @@ class KernelComputeWy {
       LocalTensor<float> wNz = storeBuf_.Get<half>().ReinterpretCast<float>();
       for (uint32_t n0 = 0; n0 < kHeadDim_; n0 += FIXED_CHUNK_SIZE) {
         const uint32_t nCur = (kHeadDim_ - n0) < FIXED_CHUNK_SIZE ? (kHeadDim_ - n0) : FIXED_CHUNK_SIZE;
-        CastFloatRowsToHalfSized(halfLocal, rhs[n0], FIXED_CHUNK_SIZE, nCur, alignK_);
-        microMm_.MmANz(rhs[n0], qHalf[ATTEN_ELEMS], halfLocal, wNz, nCur, alignK_);
+        CastFloatRowsToHalfSized(qHalf, rhs[n0], FIXED_CHUNK_SIZE, nCur, alignK_);
+        microMm_.MmANz(rhs[n0], qHalf[ATTEN_ELEMS], qHalf, wNz, nCur, alignK_);
       }
     }
-    // Kick the V load immediately (halfLocal is free once the W solve consumed
-    // its stagings); the W store drains from storeBuf under the whole U phase.
-    // V_MTE2: the W solve's B-casts wrote halfLocal on V — without this the
-    // MTE2 load can land FIRST and get overwritten by the stale cast (WAW
-    // across queues; the old library call's trailing PIPE_ALL hid it).
-    SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
     LocalTensor<half> storeLocal = storeBuf_.Get<half>();
-    LoadBthdChunk(vGm_, halfLocal, b, tokenStart, vHeadIdx, vNumHead_, vHeadDim_, alignV_);
     Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkKElems_);
     SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
     StoreBhtdChunk(wKernelGm_, storeLocal, b, vHeadIdx, tokenStart, vNumHead_, kHeadDim_, alignK_);
