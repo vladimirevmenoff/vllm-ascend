@@ -10,6 +10,7 @@
 #include "../chunk_gated_delta_rule_compute_wy_tiling_data.h"
 
 #include "compute_wy_cube.h"
+#include "compute_wy_micro_mm.h"
 #include "compute_wy_lambda_table.h"
 
 namespace ChunkGatedDeltaRuleComputeWy {
@@ -94,6 +95,7 @@ class KernelComputeWy {
 
     const uint32_t localWsBytes = localWorkspaceSize_ == 0 ? (32 * 1024) : localWorkspaceSize_;
     pipe_->InitBuffer(mmLocalWsBuf_, localWsBytes);
+    microMm_.Init(pipe_);
     cubeGemm_.Init(&tiling->mmAttn, &tiling->mmSquare, &tiling->mmApplyU, &tiling->mmApplyW, pipe_,
                    mmLocalWsBuf_.Get<uint8_t>(), localWsBytes, workspace, tiling->workspaceOffset,
                    perCoreWorkspaceBytes_, usedCoreNum_, kHeadDim_, vHeadDim_);
@@ -545,7 +547,8 @@ class KernelComputeWy {
   // T-build applies is halfLocal reinterpreted as float (K half is dead by now);
   // qHalf[0:4096] stages P uploads, qHalf[4096:8192] stages T's B-operand halves.
   __aicore__ inline void BuildT(LocalTensor<float> attnLocal, LocalTensor<float> tOut,
-                                LocalTensor<float> cScratch, LocalTensor<half> pHalf, LocalTensor<half> tHalf) {
+                                LocalTensor<float> cScratch, LocalTensor<half> pHalf, LocalTensor<half> tHalf,
+                                LocalTensor<float> cNz) {
     Duplicate(tOut, 0.0f, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
     SyncEvent<HardEvent::V_S>(HardEvent::V_S);
@@ -561,9 +564,13 @@ class KernelComputeWy {
     cubeGemm_.GemmSquare(attnLocal, pHalf);
     SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
     for (uint32_t round = 1; round < DOUBLING_ROUNDS; ++round) {
+      // T-update on the hand-rolled cube path: C = P @ T, then T += C.
       Cast(pHalf, attnLocal, RoundMode::CAST_NONE, ATTEN_ELEMS);
+      Cast(tHalf, tOut, RoundMode::CAST_NONE, ATTEN_ELEMS);
       PipeBarrier<PIPE_V>();
-      cubeGemm_.GemmApplyAdd(tOut, pHalf, tHalf, cScratch);
+      microMm_.Mm(cScratch, pHalf, tHalf, cNz, FIXED_CHUNK_SIZE);
+      Add(tOut, tOut, cScratch, ATTEN_ELEMS);
+      PipeBarrier<PIPE_V>();
       if (round + 1 < DOUBLING_ROUNDS) {
         cubeGemm_.GemmSquare(attnLocal, pHalf);
         SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
@@ -636,7 +643,7 @@ class KernelComputeWy {
     // the gram) is the reinterpreted C scratch; qHalf hosts both half stagings.
     LocalTensor<float> cScratch = halfLocal.template ReinterpretCast<float>();
     if (!useFp32ForwardSubstitution) {
-      BuildT(attnLocal, scratch, cScratch, qHalf, qHalf[ATTEN_ELEMS]);
+      BuildT(attnLocal, scratch, cScratch, qHalf, qHalf[ATTEN_ELEMS], storeBuf_.Get<half>().ReinterpretCast<float>());
     }
     // STAGECUT_3_gate_buildT
 
@@ -700,6 +707,7 @@ class KernelComputeWy {
   GlobalTensor<half> qGm_, kGm_, vGm_, betaGm_, qKernelGm_, kKernelGm_, wKernelGm_, uKernelGm_;
   GlobalTensor<float> gGm_, gKernelGm_;
   WyCubeGemm cubeGemm_;
+  WyMicroMm microMm_;
   TBuf<TPosition::VECCALC> halfBuf_, qHalfBuf_, rhsBuf_, attnBuf_, gBuf_,
       expGBuf_, tmpBuf_, rowBuf_, negABuf_, lamOffBuf_, gOffBuf_, betaOffBuf_, lane0OffBuf_, betaHalfBuf_, storeBuf_, mmLocalWsBuf_;
 };
