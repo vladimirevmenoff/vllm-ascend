@@ -116,3 +116,9 @@ from prior failed builds — filter by date.
   Full-width direct-C solves likely fine with ws32 -> -2 calls + no writebacks/compacts. Also BuildT round1 = I+A (vector, -1 call).
 - If r3 confirms: stack (a) full-width direct-C solves, (b) round1 vector shortcut => ~14->13 calls, est ~1250-1350;
   then raw Mmad rewrite of BuildT+solves for the rest of the way to 800.
+
+## 2026-08-31 11:15: NEIGHBOR POLLUTION — d2d_memcpy on dev7 (same card as dev6)
+- probe2 (P==0 early-exit) battery: green but 2.7x "slower" — d2d_memcpy_sing on NPU4/chip1 hammers card BW; launch-bound shape flat.
+- => ALL of today's timings suspect (1530..1778 spread on identical code). Only yesterday's quiet 1530 is solid.
+- Quiet-box watcher armed; on quiet: full battery on HEAD (probe1: direct-C solves + round-0 shortcut; probe2: P==0 exit) for a clean number.
+- Correctness meanwhile locked: every build today cos=1.0 all 9.
