@@ -11,6 +11,7 @@
 
 #include "compute_wy_cube.h"
 #include "compute_wy_micro_mm.h"
+#include "compute_wy_identity_nz.h"
 #include "compute_wy_lambda_table.h"
 
 namespace ChunkGatedDeltaRuleComputeWy {
@@ -92,6 +93,7 @@ class KernelComputeWy {
     wKernelGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(wKernel));
     uKernelGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(uKernel));
     gKernelGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(gKernel));
+    iNzGm_.SetGlobalBuffer(const_cast<__gm__ float*>(WY_IDENTITY_NZ));
 
     const uint32_t localWsBytes = localWorkspaceSize_ == 0 ? (32 * 1024) : localWorkspaceSize_;
     pipe_->InitBuffer(mmLocalWsBuf_, localWsBytes);
@@ -554,18 +556,18 @@ class KernelComputeWy {
     // C's all stay NZ (elementwise ops are layout-agnostic), so no per-round
     // conversions and single contiguous L1 stagings. tHalf leaves this
     // function in NZ — the solves stage it with MmANz.
+    // The GM identity load overlaps the layout convert; cScratch is free here.
+    SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
+    DataCopy(cScratch, iNzGm_, ATTEN_ELEMS);
     for (uint32_t j = 0; j < 4; ++j) {
       Muls(tOut[j * 64 * 16], attnLocal[j * 16], 1.0f, static_cast<uint64_t>(16), 64, {1, 1, 2, 8});
     }
     PipeBarrier<PIPE_V>();
     Adds(attnLocal, tOut, 0.0f, ATTEN_ELEMS);
+    SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+    // T = I + A in NZ, no scalar writes (A's diagonal is strictly zero).
+    Add(tOut, tOut, cScratch, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
-    SyncEvent<HardEvent::V_S>(HardEvent::V_S);
-    for (uint32_t i = 0; i < FIXED_CHUNK_SIZE; ++i) {
-      // I on the NZ diagonal (A's diagonal is strictly zero, so set not add).
-      tOut.SetValue((i / 16) * 1024 + i * 16 + (i % 16), 1.0f);
-    }
-    SyncEvent<HardEvent::S_V>(HardEvent::S_V);
     // Round 0's T-update is T = I + A, already materialized above; square P.
     Cast(pHalf, attnLocal, RoundMode::CAST_NONE, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
@@ -746,7 +748,7 @@ class KernelComputeWy {
   uint32_t maxAlign_{0};
   uint32_t localWorkspaceSize_{0}, perCoreWorkspaceBytes_{0}, usedCoreNum_{1};
   GlobalTensor<half> qGm_, kGm_, vGm_, betaGm_, qKernelGm_, kKernelGm_, wKernelGm_, uKernelGm_;
-  GlobalTensor<float> gGm_, gKernelGm_;
+  GlobalTensor<float> gGm_, gKernelGm_, iNzGm_;
   WyCubeGemm cubeGemm_;
   WyMicroMm microMm_;
   TBuf<TPosition::VECCALC> halfBuf_, qHalfBuf_, rhsBuf_, attnBuf_, gBuf_,
