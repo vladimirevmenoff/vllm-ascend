@@ -116,3 +116,11 @@ from prior failed builds — filter by date.
   Full-width direct-C solves likely fine with ws32 -> -2 calls + no writebacks/compacts. Also BuildT round1 = I+A (vector, -1 call).
 - If r3 confirms: stack (a) full-width direct-C solves, (b) round1 vector shortcut => ~14->13 calls, est ~1250-1350;
   then raw Mmad rewrite of BuildT+solves for the rest of the way to 800.
+
+## 2026-08-31 12:55: RAW MMAD GRIND begins (user-ordered over accepting 3x)
+- basic-cfg dead on m200 entirely (copy_cube_in_using_ub rejects it for ALL input positions). Box green-restored (probe7 ~1550).
+- Study agent extracted the m200 recipe from toolkit sources (talk/mm-handroll-m200-recipe.md): UB->L1 nd2nz per-16col DataCopy,
+  load2d L0A (Zz, stride K1) / L0B (Zn, ifTranspose=true), Mmad(m,n,k,cmatrixInitVal=true), CO1->UB BLOCK_MODE_MATRIX + Muls NZ->ND.
+- WyMicroMm implemented (compute_wy_micro_mm.h): A1/B1/A2/B2/CO1 TBufs, event chain V_MTE3/MTE3_MTE1/MTE1_M/M_V/V_M.
+- mm1 = micro-mm wired into T-updates only (5 calls/task). Iterating: layout-cos bugs expected before green.
+- Unknowns from recipe: UB->L1 executing pipe (assumed MTE3), LoadData3D defaults (avoided: using load2d).

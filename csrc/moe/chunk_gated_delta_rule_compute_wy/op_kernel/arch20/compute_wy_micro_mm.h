@@ -27,9 +27,14 @@ class WyMicroMm {
   }
 
   // aUb: [64,64] half, row stride 64. bUb: [64,n] half, row stride n (both
-  // contiguous ND). cUb: [64,n] fp32, row stride n. cNz: fp32 scratch >= 64*n.
+  // contiguous ND). cUb: [64,n] fp32, row stride ldc. cNz: fp32 scratch >= 64*n.
   __aicore__ inline void Mm(LocalTensor<float> cUb, LocalTensor<half> aUb, LocalTensor<half> bUb,
                             LocalTensor<float> cNz, uint32_t n) {
+    Mm(cUb, aUb, bUb, cNz, n, n);
+  }
+
+  __aicore__ inline void Mm(LocalTensor<float> cUb, LocalTensor<half> aUb, LocalTensor<half> bUb,
+                            LocalTensor<float> cNz, uint32_t n, uint32_t ldc) {
     LocalTensor<half> l1A = l1ABuf_.Get<half>();
     LocalTensor<half> l1B = l1BBuf_.Get<half>();
     LocalTensor<half> l0A = l0ABuf_.Get<half>();
@@ -71,7 +76,7 @@ class WyMicroMm {
     PipeBarrier<PIPE_V>();
     for (uint32_t j = 0; j < n1; ++j) {
       Muls(cUb[j * 16], cNz[j * 64 * 16], 1.0f, static_cast<uint64_t>(16), 64,
-           {1, 1, static_cast<uint8_t>(n * sizeof(float) / 32), 2});
+           {1, 1, static_cast<uint8_t>(ldc * sizeof(float) / 32), 2});
     }
     PipeBarrier<PIPE_V>();
     Evt<HardEvent::V_M>();

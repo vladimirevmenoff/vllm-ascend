@@ -561,8 +561,7 @@ class KernelComputeWy {
     PipeBarrier<PIPE_V>();
     Cast(pHalf, attnLocal, RoundMode::CAST_NONE, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
-    cubeGemm_.GemmSquare(attnLocal, pHalf);
-    SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+    microMm_.Mm(attnLocal, pHalf, pHalf, cNz, FIXED_CHUNK_SIZE);
     for (uint32_t round = 1; round < DOUBLING_ROUNDS; ++round) {
       // T-update on the hand-rolled cube path: C = P @ T, then T += C.
       Cast(pHalf, attnLocal, RoundMode::CAST_NONE, ATTEN_ELEMS);
@@ -572,8 +571,8 @@ class KernelComputeWy {
       Add(tOut, tOut, cScratch, ATTEN_ELEMS);
       PipeBarrier<PIPE_V>();
       if (round + 1 < DOUBLING_ROUNDS) {
-        cubeGemm_.GemmSquare(attnLocal, pHalf);
-        SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+        // P = P @ P on the micro path; C lands straight in attnLocal.
+        microMm_.Mm(attnLocal, pHalf, pHalf, cNz, FIXED_CHUNK_SIZE);
       }
     }
     // Keep half(T) resident in UB (tHalf); both RHS applies read it directly.
@@ -651,7 +650,14 @@ class KernelComputeWy {
     if (useFp32ForwardSubstitution) {
       Fp32ForwardSubstitution(attnLocal, rhs, kHeadDim_, alignK_);
     } else {
-      cubeGemm_.GemmApplyReplace(rhs, qHalf[ATTEN_ELEMS], halfLocal, scratch, kHeadDim_, alignK_, /*useU=*/false);
+      // Micro-path solve: per 64-wide slice, compact-cast B then C into the
+      // rhs slice (ldc = alignK). cNz scratch: storeBuf as fp32.
+      LocalTensor<float> wNz = storeBuf_.Get<half>().ReinterpretCast<float>();
+      for (uint32_t n0 = 0; n0 < kHeadDim_; n0 += FIXED_CHUNK_SIZE) {
+        const uint32_t nCur = (kHeadDim_ - n0) < FIXED_CHUNK_SIZE ? (kHeadDim_ - n0) : FIXED_CHUNK_SIZE;
+        CastFloatRowsToHalfSized(halfLocal, rhs[n0], FIXED_CHUNK_SIZE, nCur, alignK_);
+        microMm_.Mm(rhs[n0], qHalf[ATTEN_ELEMS], halfLocal, wNz, nCur, alignK_);
+      }
     }
     // Kick the V load immediately (halfLocal is free once the W solve consumed
     // its stagings); the W store drains from storeBuf under the whole U phase.
@@ -684,7 +690,19 @@ class KernelComputeWy {
       PipeBarrier<PIPE_V>();
       BroadcastMulRowsHalf(halfLocal, halfLocal, betaHalfVec, brcbHalf, FIXED_CHUNK_SIZE, vHeadDim_, alignV_,
                            alignV_);
-      cubeGemm_.GemmApplyPreCastB(rhs, qHalf[ATTEN_ELEMS], halfLocal, qHalf, scratch, vHeadDim_, alignV_);
+      LocalTensor<float> uNz = storeBuf_.Get<half>().ReinterpretCast<float>();
+      for (uint32_t n0 = 0; n0 < vHeadDim_; n0 += FIXED_CHUNK_SIZE) {
+        const uint32_t nCur = (vHeadDim_ - n0) < FIXED_CHUNK_SIZE ? (vHeadDim_ - n0) : FIXED_CHUNK_SIZE;
+        LocalTensor<half> bFeedU = halfLocal;
+        if (!(n0 == 0 && alignV_ == nCur)) {
+          Muls(qHalf, halfLocal[n0], static_cast<half>(1), static_cast<uint64_t>(nCur), FIXED_CHUNK_SIZE,
+               {1, 1, static_cast<uint8_t>(nCur * sizeof(half) / 32),
+                static_cast<uint8_t>(alignV_ * sizeof(half) / 32)});
+          PipeBarrier<PIPE_V>();
+          bFeedU = qHalf;
+        }
+        microMm_.Mm(rhs[n0], qHalf[ATTEN_ELEMS], bFeedU, uNz, nCur, alignV_);
+      }
       SyncEvent<HardEvent::MTE3_V>(HardEvent::MTE3_V);
       Cast(storeLocal, rhs, RoundMode::CAST_NONE, chunkVElems_);
       SyncEvent<HardEvent::V_MTE3>(HardEvent::V_MTE3);
