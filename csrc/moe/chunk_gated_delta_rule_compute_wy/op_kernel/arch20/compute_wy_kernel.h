@@ -553,7 +553,14 @@ class KernelComputeWy {
       tOut.SetValue(i * FIXED_CHUNK_SIZE + i, 1.0f);
     }
     SyncEvent<HardEvent::S_V>(HardEvent::S_V);
-    for (uint32_t round = 0; round < DOUBLING_ROUNDS; ++round) {
+    // Round 0 is T = I + A — a pure vector add (T was just seeded with I).
+    Add(tOut, tOut, attnLocal, ATTEN_ELEMS);
+    PipeBarrier<PIPE_V>();
+    Cast(pHalf, attnLocal, RoundMode::CAST_NONE, ATTEN_ELEMS);
+    PipeBarrier<PIPE_V>();
+    cubeGemm_.GemmSquare(attnLocal, pHalf);
+    SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+    for (uint32_t round = 1; round < DOUBLING_ROUNDS; ++round) {
       Cast(pHalf, attnLocal, RoundMode::CAST_NONE, ATTEN_ELEMS);
       PipeBarrier<PIPE_V>();
       cubeGemm_.GemmApplyAdd(tOut, pHalf, tHalf, cScratch);

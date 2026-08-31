@@ -107,3 +107,12 @@ from prior failed builds — filter by date.
   64x64 = exactly 8KB -> K=V=64 shapes stayed green, masking it. First NaN run (gatefix 16:19 08-20) right after the ws-8KB ship.
 - Fix: ws back to 32KB (commit), chains now ship FULL op source (op_host+op_kernel) - never stale tiling again.
 - wsfix chain running: HEAD kernel (sliced+scalar+tau2.5) + ws32. PR 13122 head still carries ws8KB tiling - push fix after green.
+
+## 2026-08-31: flat probes converge on per-call lib overhead; r3 falsification probe
+- ubgram (UB-fed gram, VECCALC B-transpose works after decl-order fix): green, FLAT 1530-1590.
+- Model: ~17 IterateAll/task x ~2us API latency ~= 1100us of 1530. All plumbing probes flat because staging isn't the cost.
+- r3 probe running: DOUBLING_ROUNDS=3 (timing-only) removes 6 calls/task -> predicts ~-380us if model right.
+- REOPENED: "direct C into rUb NaNs" was misattributed — NaN era began with ws8KB ship (16:19 08-20), BEFORE deslice (16:54).
+  Full-width direct-C solves likely fine with ws32 -> -2 calls + no writebacks/compacts. Also BuildT round1 = I+A (vector, -1 call).
+- If r3 confirms: stack (a) full-width direct-C solves, (b) round1 vector shortcut => ~14->13 calls, est ~1250-1350;
+  then raw Mmad rewrite of BuildT+solves for the rest of the way to 800.
