@@ -625,7 +625,16 @@ class KernelComputeWy {
     // Cube: G = Kβ @ K^T → attnLocal; then A = −strictlower(G ⊙ Λ).
     CastFloatRowsToHalf(qHalf, rhs, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
     // halfLocal already holds the full-width K half block from the slice loads.
-    microMm_.GramAcc(attnLocal, qHalf, halfLocal, storeBuf_.Get<half>().ReinterpretCast<float>(), kHeadDim_, kHeadDim_, alignK_);
+    if (kHeadDim_ >= 128) {
+      microMm_.GramAcc(attnLocal, qHalf, halfLocal, storeBuf_.Get<half>().ReinterpretCast<float>(), kHeadDim_,
+                       kHeadDim_, alignK_);
+    } else {
+      // kHeadDim<128: the micro gram's rounding shifts the fallback-gate
+      // boundary on weak-decay data (battery K=64 shape drops to cos 0.978);
+      // the library gram keeps it at 0.9995. Cost: 2 lib calls on small dims.
+      cubeGemm_.GemmATransB(attnLocal, qHalf, halfLocal, scratch, storeBuf_.Get<half>(), kHeadDim_, kHeadDim_,
+                            alignK_);
+    }
     SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
     Muls(attnLocal, attnLocal, -1.0f, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
