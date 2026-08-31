@@ -93,12 +93,16 @@ class KernelComputeWy {
     uKernelGm_.SetGlobalBuffer(reinterpret_cast<__gm__ half*>(uKernel));
     gKernelGm_.SetGlobalBuffer(reinterpret_cast<__gm__ float*>(gKernel));
 
-    const uint32_t localWsBytes = localWorkspaceSize_ == 0 ? (32 * 1024) : localWorkspaceSize_;
-    pipe_->InitBuffer(mmLocalWsBuf_, localWsBytes);
     microMm_.Init(pipe_);
-    cubeGemm_.Init(&tiling->mmAttn, &tiling->mmSquare, &tiling->mmApplyU, &tiling->mmApplyW, pipe_,
-                   mmLocalWsBuf_.Get<uint8_t>(), localWsBytes, workspace, tiling->workspaceOffset,
-                   perCoreWorkspaceBytes_, usedCoreNum_, kHeadDim_, vHeadDim_);
+    if (kHeadDim_ < 128) {
+      // The matmul library only backs the small-dim gram now; skip its whole
+      // five-object Init (and the 32KB local workspace) on 128-dim launches.
+      const uint32_t localWsBytes = localWorkspaceSize_ == 0 ? (32 * 1024) : localWorkspaceSize_;
+      pipe_->InitBuffer(mmLocalWsBuf_, localWsBytes);
+      cubeGemm_.Init(&tiling->mmAttn, &tiling->mmSquare, &tiling->mmApplyU, &tiling->mmApplyW, pipe_,
+                     mmLocalWsBuf_.Get<uint8_t>(), localWsBytes, workspace, tiling->workspaceOffset,
+                     perCoreWorkspaceBytes_, usedCoreNum_, kHeadDim_, vHeadDim_);
+    }
 
     uint32_t maxAlign = (alignK_ > alignV_ ? alignK_ : alignV_);
     if (maxAlign < FIXED_CHUNK_SIZE) {
