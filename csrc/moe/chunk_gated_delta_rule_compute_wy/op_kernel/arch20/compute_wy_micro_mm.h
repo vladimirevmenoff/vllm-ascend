@@ -88,6 +88,51 @@ class WyMicroMm {
     Evt<HardEvent::V_M>();
   }
 
+  // C[64,64] fp32 = A[64,kDim] @ B[64,kDim]^T, accumulated over 64-wide K
+  // slices IN L0C (one readback total). A/B are ND in UB with row strides
+  // aLda/bLda. For A@B^T the per-fractal LoadData transpose cancels the matrix
+  // transpose, so B fractals load straight (no flag, stride 1).
+  __aicore__ inline void GramAcc(LocalTensor<float> cUb, LocalTensor<half> aUb, LocalTensor<half> bUb,
+                                 LocalTensor<float> cNz, uint32_t kDim, uint32_t aLda, uint32_t bLda) {
+    LocalTensor<half> l1A = l1ABuf_.Get<half>();
+    LocalTensor<half> l1B = l1BBuf_.Get<half>();
+    LocalTensor<half> l0A = l0ABuf_.Get<half>();
+    LocalTensor<half> l0B = l0BBuf_.Get<half>();
+    LocalTensor<float> co = coBuf_.Get<float>();
+    Evt<HardEvent::V_MTE3>();
+    for (uint32_t k0 = 0; k0 < kDim; k0 += 64) {
+      Evt<HardEvent::MTE1_MTE3>();
+      for (uint32_t j = 0; j < 4; ++j) {
+        DataCopy(l1A[j * 64 * 16], aUb[k0 + j * 16], {64, 1, static_cast<uint16_t>(aLda / 16 - 1), 0});
+        DataCopy(l1B[j * 64 * 16], bUb[k0 + j * 16], {64, 1, static_cast<uint16_t>(bLda / 16 - 1), 0});
+      }
+      Evt<HardEvent::MTE3_MTE1>();
+      Evt<HardEvent::M_MTE1>();
+      LoadData2dParams pa(0, 4, 4, 0, 0, false, 0);
+      for (uint32_t i = 0; i < 4; ++i) {
+        LoadData(l0A[i * 4 * 256], l1A[i * 256], pa);
+      }
+      LoadData2dParams pb(0, 4, 1, 0, 0, false, 0);
+      for (uint32_t i = 0; i < 4; ++i) {
+        LoadData(l0B[i * 4 * 256], l1B[i * 1024], pb);
+      }
+      Evt<HardEvent::MTE1_M>();
+      MmadParams mp(64, 64, 64, /*unitFlag=*/0, /*cmatrixSource=*/false,
+                    /*cmatrixInitVal=*/k0 == 0);
+      Mmad(co, l0A, l0B, mp);
+    }
+    Evt<HardEvent::M_V>();
+    DataCopyEnhancedParams enh;
+    enh.blockMode = BlockMode::BLOCK_MODE_MATRIX;
+    DataCopy(cNz, co, {4, 4, 0, 0}, enh);
+    PipeBarrier<PIPE_V>();
+    for (uint32_t j = 0; j < 4; ++j) {
+      Muls(cUb[j * 16], cNz[j * 64 * 16], 1.0f, static_cast<uint64_t>(16), 64, {1, 1, 8, 2});
+    }
+    PipeBarrier<PIPE_V>();
+    Evt<HardEvent::V_M>();
+  }
+
  private:
   template <HardEvent E>
   __aicore__ inline void Evt() {

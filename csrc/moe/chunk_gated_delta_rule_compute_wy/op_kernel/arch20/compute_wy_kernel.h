@@ -625,7 +625,7 @@ class KernelComputeWy {
     // Cube: G = Kβ @ K^T → attnLocal; then A = −strictlower(G ⊙ Λ).
     CastFloatRowsToHalf(qHalf, rhs, FIXED_CHUNK_SIZE, kHeadDim_, alignK_);
     // halfLocal already holds the full-width K half block from the slice loads.
-    cubeGemm_.GemmATransB(attnLocal, qHalf, halfLocal, scratch, storeBuf_.Get<half>(), kHeadDim_, kHeadDim_, alignK_);
+    microMm_.GramAcc(attnLocal, qHalf, halfLocal, storeBuf_.Get<half>().ReinterpretCast<float>(), kHeadDim_, kHeadDim_, alignK_);
     SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
     Muls(attnLocal, attnLocal, -1.0f, ATTEN_ELEMS);
     PipeBarrier<PIPE_V>();
