@@ -31,7 +31,8 @@ using WyMmAUbType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, false>;
 using WyMmBUbType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, false>;
 using WyMatmulApplyUb = matmul::MatmulImpl<WyMmAUbType, WyMmBUbType, WyMmCType, WyMmBiasType, WY_CFG_BASIC>;
 using WyMmBUbTransType = MatmulType<TPosition::VECCALC, CubeFormat::ND, half, true>;
-using WyMatmulBTransUb = matmul::MatmulImpl<WyMmAUbType, WyMmBUbTransType, WyMmCType, WyMmBiasType, WY_CFG_BASIC>;
+// (basic-block config does not compile for the UB B-transpose copy path)
+using WyMatmulBTransUb = matmul::MatmulImpl<WyMmAUbType, WyMmBUbTransType, WyMmCType, WyMmBiasType>;
 // (half-C UB output wedges the 310P cube — aicore timeout; keep C fp32)
 
 // GM staging: A_half(64*MAX_HEAD) + B_half(64*MAX_HEAD). Cube writes C directly to UB.
