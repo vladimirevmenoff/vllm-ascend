@@ -19,9 +19,11 @@ using namespace AscendC;
 class WyMicroMm {
  public:
   __aicore__ inline void Init(TPipe *pipe) {
-    pipe->InitBuffer(l1ABuf_, 64 * 64 * sizeof(half));
+    // A-side is 64x128 so MmNz2 can hold a hi+lo operand pair ([0:4096) hi,
+    // [4096:8192) lo); the single-matrix calls keep using the first half.
+    pipe->InitBuffer(l1ABuf_, 64 * 128 * sizeof(half));
     pipe->InitBuffer(l1BBuf_, 64 * 128 * sizeof(half));
-    pipe->InitBuffer(l0ABuf_, 64 * 64 * sizeof(half));
+    pipe->InitBuffer(l0ABuf_, 64 * 128 * sizeof(half));
     pipe->InitBuffer(l0BBuf_, 64 * 128 * sizeof(half));
     pipe->InitBuffer(coBuf_, 64 * 128 * sizeof(float));
   }
@@ -122,6 +124,48 @@ class WyMicroMm {
     Evt<HardEvent::V_M>();
   }
 
+  // Compensated 64^3 NZ matmul: C = A@B with A/B fp32 NZ in UB. Each operand
+  // splits into hi = half(x), lo = half(x - float(hi)); three Mmads accumulate
+  // hi*hi + hi*lo + lo*hi in L0C (lo*lo ~2^-22 is dropped), so C carries
+  // near-fp32 operand precision at ~2x the staging cost of MmNz. Used by the
+  // gate-tripped doubling path, where plain fp16 casts of the growing P/T
+  // compound into visible error. In-place C (cNzOut aliasing aF32/bF32) is
+  // safe: both operands are fully staged to L1 before the readback writes C.
+  // workHalf: 64x64 half scratch, workF32: 64x64 fp32 scratch (both clobbered).
+  __aicore__ inline void MmNz2(LocalTensor<float> cNzOut, LocalTensor<float> aF32, LocalTensor<float> bF32,
+                               LocalTensor<half> workHalf, LocalTensor<float> workF32) {
+    LocalTensor<half> l1A = l1ABuf_.Get<half>();
+    LocalTensor<half> l1B = l1BBuf_.Get<half>();
+    LocalTensor<half> l0A = l0ABuf_.Get<half>();
+    LocalTensor<half> l0B = l0BBuf_.Get<half>();
+    LocalTensor<float> co = coBuf_.Get<float>();
+    Evt<HardEvent::MTE1_MTE3>();
+    StageSplit(l1A, aF32, workHalf, workF32);
+    StageSplit(l1B, bF32, workHalf, workF32);
+    Evt<HardEvent::MTE3_MTE1>();
+    Evt<HardEvent::M_MTE1>();
+    LoadData2dParams pa(0, 4, 4, 0, 0, false, 0);
+    LoadData2dParams pb(0, 4, 4, 0, 0, true, 0);
+    for (uint32_t i = 0; i < 4; ++i) {
+      LoadData(l0A[i * 4 * 256], l1A[i * 256], pa);
+      LoadData(l0A[4096 + i * 4 * 256], l1A[4096 + i * 256], pa);
+      LoadData(l0B[i * 4 * 256], l1B[i * 256], pb);
+      LoadData(l0B[4096 + i * 4 * 256], l1B[4096 + i * 256], pb);
+    }
+    Evt<HardEvent::MTE1_M>();
+    MmadParams mpInit(64, 64, 64, 0, false, true);
+    MmadParams mpAcc(64, 64, 64, 0, false, false);
+    Mmad(co, l0A, l0B, mpInit);
+    Mmad(co, l0A, l0B[4096], mpAcc);
+    Mmad(co, l0A[4096], l0B, mpAcc);
+    Evt<HardEvent::M_V>();
+    DataCopyEnhancedParams enh;
+    enh.blockMode = BlockMode::BLOCK_MODE_MATRIX;
+    DataCopy(cNzOut, co, {4, 4, 0, 0}, enh);
+    PipeBarrier<PIPE_V>();
+    Evt<HardEvent::V_M>();
+  }
+
   // Solve variant with the A operand already NZ (half): one contiguous staging
   // copy for A; B stays ND.
   __aicore__ inline void MmANz(LocalTensor<float> cUb, LocalTensor<half> aNzHalf, LocalTensor<half> bUb,
@@ -210,6 +254,26 @@ class WyMicroMm {
   }
 
  private:
+  // Split-cast one fp32 NZ matrix into L1 as a hi+lo half pair. workHalf is
+  // reused for both halves, so each L1 copy must drain before the next cast
+  // overwrites it (the MTE3_V waits); the trailing one also frees workHalf
+  // for the caller's next StageSplit.
+  __aicore__ inline void StageSplit(LocalTensor<half> l1Dst, LocalTensor<float> xF32, LocalTensor<half> workHalf,
+                                    LocalTensor<float> workF32) {
+    Cast(workHalf, xF32, RoundMode::CAST_NONE, 64 * 64);
+    PipeBarrier<PIPE_V>();
+    Cast(workF32, workHalf, RoundMode::CAST_NONE, 64 * 64);
+    PipeBarrier<PIPE_V>();
+    Sub(workF32, xF32, workF32, 64 * 64);
+    Evt<HardEvent::V_MTE3>();
+    DataCopy(l1Dst, workHalf, 64 * 64);
+    Evt<HardEvent::MTE3_V>();
+    Cast(workHalf, workF32, RoundMode::CAST_NONE, 64 * 64);
+    Evt<HardEvent::V_MTE3>();
+    DataCopy(l1Dst[4096], workHalf, 64 * 64);
+    Evt<HardEvent::MTE3_V>();
+  }
+
   template <HardEvent E>
   __aicore__ inline void Evt() {
     event_t evt = static_cast<event_t>(GetTPipePtr()->FetchEventID(E));

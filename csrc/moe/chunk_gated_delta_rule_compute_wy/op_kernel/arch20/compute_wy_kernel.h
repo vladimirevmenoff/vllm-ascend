@@ -36,6 +36,9 @@ constexpr uint32_t DOUBLING_ROUNDS = 6;  // log2(64)
 // 4.0 keeps the truly pathological chunks (and NaN) on the exact fp32 path and
 // is validated by the 9-shape adversarial cosine battery.
 constexpr float FP32_FS_ROW_SUM_THRESHOLD = 2.5f;
+// Above this row-sum the compensated doubling's fp16 hi/lo split can overflow
+// (T grows ~e^rowsum worst case; half tops out at 65504); route to scalar.
+constexpr float COMP_DOUBLING_MAX_ROW_SUM = 9.0f;
 
 __aicore__ inline uint32_t AlignUp(uint32_t value, uint32_t align) { return (value + align - 1) / align * align; }
 __aicore__ inline uint16_t BytesToBlocks(uint32_t bytes) { return static_cast<uint16_t>(AlignUp(bytes, BLOCK_BYTES) / BLOCK_BYTES); }
@@ -454,6 +457,9 @@ class KernelComputeWy {
     SyncEvent<HardEvent::V_S>(HardEvent::V_S);
     const float maxSum = reduceScratch.GetValue(0);
     const float totSum = reduceScratch.GetValue(1);
+    // NaN propagates into gateMaxRowSum_ and fails every < compare, so NaN
+    // input data routes to the scalar path like before.
+    gateMaxRowSum_ = (totSum != totSum) ? totSum : maxSum;
     return (totSum != totSum) || (maxSum >= FP32_FS_ROW_SUM_THRESHOLD);
   }
 
@@ -588,6 +594,41 @@ class KernelComputeWy {
     PipeBarrier<PIPE_V>();
   }
 
+  // Compensated doubling for gate-tripped tasks (row sums >= 2.5): same
+  // NZ-resident structure as BuildT, but every product runs MmNz2 (hi+lo
+  // split operands, fp32-accumulated), so the growing P/T survive the six
+  // squarings at near-fp32 precision. ~2x BuildT's cost — still ~50x cheaper
+  // than the scalar forward substitution it replaces. The final T is cast to
+  // half ONCE for the solves; that single rounding does not compound.
+  // workHalf = qHalf[0:ATTEN), tHalf = qHalf[ATTEN:2*ATTEN),
+  // workF32 = halfLocal reinterpreted (V is NOT yet loaded on this path).
+  __aicore__ inline void BuildTComp(LocalTensor<float> attnLocal, LocalTensor<float> tOut,
+                                    LocalTensor<float> cScratch, LocalTensor<half> workHalf,
+                                    LocalTensor<half> tHalf, LocalTensor<float> workF32) {
+    SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
+    DataCopy(cScratch, iNzGm_, ATTEN_ELEMS);
+    for (uint32_t j = 0; j < 4; ++j) {
+      Muls(tOut[j * 64 * 16], attnLocal[j * 16], 1.0f, static_cast<uint64_t>(16), 64, {1, 1, 2, 8});
+    }
+    PipeBarrier<PIPE_V>();
+    Adds(attnLocal, tOut, 0.0f, ATTEN_ELEMS);
+    SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
+    Add(tOut, tOut, cScratch, ATTEN_ELEMS);
+    PipeBarrier<PIPE_V>();
+    // Round 0: T = I + A is materialized; square P in place.
+    microMm_.MmNz2(attnLocal, attnLocal, attnLocal, workHalf, workF32);
+    for (uint32_t round = 1; round < DOUBLING_ROUNDS; ++round) {
+      microMm_.MmNz2(cScratch, attnLocal, tOut, workHalf, workF32);
+      Add(tOut, tOut, cScratch, ATTEN_ELEMS);
+      PipeBarrier<PIPE_V>();
+      if (round + 1 < DOUBLING_ROUNDS) {
+        microMm_.MmNz2(attnLocal, attnLocal, attnLocal, workHalf, workF32);
+      }
+    }
+    Cast(tHalf, tOut, RoundMode::CAST_NONE, ATTEN_ELEMS);
+    PipeBarrier<PIPE_V>();
+  }
+
 
   __aicore__ inline void ProcessOneTask(uint32_t b, uint32_t kHeadIdx, uint32_t vHeadIdx, uint32_t chunkIdx) {
     const uint32_t tokenStart = chunkIdx * FIXED_CHUNK_SIZE;
@@ -655,6 +696,16 @@ class KernelComputeWy {
     // betaLocal must survive for the pass-2 βV product.
     const bool useFp32ForwardSubstitution =
         NeedsFp32ForwardSubstitution(attnLocal, scratch, expGLocal, reduceScratch);
+    // Gate-tripped tasks on the all-micro path take the compensated doubling
+    // (hi+lo split matmuls) instead of the ~50x slower scalar substitution;
+    // small head dims keep the scalar fallback (their gram runs on the lib and
+    // the K=64 shapes sit right on the precision boundary). Beyond
+    // COMP_DOUBLING_MAX_ROW_SUM the intermediate T can outgrow fp16 range
+    // (||T|| ~ e^rowsum worst case; half caps at 65504 ~ e^11) and the split
+    // cast turns inf — those rows stay on the exact scalar path.
+    const bool useCompDoubling = useFp32ForwardSubstitution && kHeadDim_ >= 128 &&
+                                 gateMaxRowSum_ < COMP_DOUBLING_MAX_ROW_SUM;
+    const bool useScalarFallback = useFp32ForwardSubstitution && !useCompDoubling;
     // ---- Build T = (I−A)⁻¹ once (skipped on the fp32 fallback path, which
     // consumes A directly). tmpBuf holds T fp32; halfLocal (K half, dead after
     // the gram) is the reinterpreted C scratch; qHalf hosts both half stagings.
@@ -666,17 +717,24 @@ class KernelComputeWy {
     // Kick the V load now: halfLocal (K) is dead after the gram, and the MTE2
     // transfer hides under the whole doubling loop. Only on the all-micro
     // 128-dim path — the small-dim library-gram flow regresses with it.
-    if (kHeadDim_ >= 128) {
+    if (kHeadDim_ >= 128 && !useCompDoubling) {
       SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
       LoadBthdChunk(vGm_, halfLocal, b, tokenStart, vHeadIdx, vNumHead_, vHeadDim_, alignV_);
     }
     if (!useFp32ForwardSubstitution) {
       BuildT(attnLocal, scratch, cScratch, qHalf, qHalf[ATTEN_ELEMS], cScratch);
+    } else if (useCompDoubling) {
+      // halfLocal is the fp32 work scratch here, so the V load waits for the
+      // build and then overlaps the W solve (which only touches qHalf/rhs).
+      BuildTComp(attnLocal, scratch, cScratch, qHalf, qHalf[ATTEN_ELEMS],
+                 halfLocal.template ReinterpretCast<float>());
+      SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
+      LoadBthdChunk(vGm_, halfLocal, b, tokenStart, vHeadIdx, vNumHead_, vHeadDim_, alignV_);
     }
     // STAGECUT_3_gate_buildT
 
     // ---- W = T @ (γβK), resident in rhs. halfLocal stages R halves. ----
-    if (useFp32ForwardSubstitution) {
+    if (useScalarFallback) {
       Fp32ForwardSubstitution(attnLocal, rhs, kHeadDim_, alignK_);
     } else {
       // Micro-path solve: per 64-wide slice, compact-cast B then C into the
@@ -700,7 +758,7 @@ class KernelComputeWy {
 
     // ---- U = T @ (βV). ----
     SyncEvent<HardEvent::MTE2_V>(HardEvent::MTE2_V);
-    if (useFp32ForwardSubstitution) {
+    if (useScalarFallback) {
       Cast(rhs, halfLocal, RoundMode::CAST_NONE, chunkVElems_);
       PipeBarrier<PIPE_V>();
       BroadcastMulRowsFloat(rhs, rhs, betaLocal, scratch, FIXED_CHUNK_SIZE, vHeadDim_, alignV_, alignV_);
@@ -752,6 +810,8 @@ class KernelComputeWy {
 
   TPipe* pipe_{nullptr};
   bool valid_{false};
+  // Max |row sum| of A from the last gate check; NaN when the data was NaN.
+  float gateMaxRowSum_{0.0f};
   uint32_t batch_{0}, seqlen_{0}, kNumHead_{0}, vNumHead_{0}, kHeadDim_{0}, vHeadDim_{0};
   uint32_t chunkSize_{0}, numChunks_{0}, headGroups_{0}, alignK_{0}, alignV_{0}, chunkKElems_{0}, chunkVElems_{0};
   uint32_t maxAlign_{0};
