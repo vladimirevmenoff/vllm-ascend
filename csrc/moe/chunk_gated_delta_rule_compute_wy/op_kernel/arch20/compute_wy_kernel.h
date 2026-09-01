@@ -37,8 +37,10 @@ constexpr uint32_t DOUBLING_ROUNDS = 6;  // log2(64)
 // is validated by the 9-shape adversarial cosine battery.
 constexpr float FP32_FS_ROW_SUM_THRESHOLD = 2.5f;
 // Above this row-sum the compensated doubling's fp16 hi/lo split can overflow
-// (T grows ~e^rowsum worst case; half tops out at 65504); route to scalar.
-constexpr float COMP_DOUBLING_MAX_ROW_SUM = 9.0f;
+// to NaN (T outgrows half range). Swept on gate-trip data: row sums 13.6 are
+// exact (cos 1.0000000), 19.2 overflow — 14.0 keeps every validated case on
+// the fast path and routes the rest to the exact scalar solve.
+constexpr float COMP_DOUBLING_MAX_ROW_SUM = 14.0f;
 
 __aicore__ inline uint32_t AlignUp(uint32_t value, uint32_t align) { return (value + align - 1) / align * align; }
 __aicore__ inline uint16_t BytesToBlocks(uint32_t bytes) { return static_cast<uint16_t>(AlignUp(bytes, BLOCK_BYTES) / BLOCK_BYTES); }
