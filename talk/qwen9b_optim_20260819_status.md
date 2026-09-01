@@ -194,3 +194,11 @@ lives on combined_13122 — separate PRs later.
 - Final: canonical ~800us (787-843 quiet, median ~808) = 5.8x; all-green battery; PR 13122 head 4faebc035.
 - Everything needed post-compaction: talk/HANDBOOK.md (env, build, harness, inference, traps).
 - Open item: serving TTFT validation (full pip rebuild first — box vendor holds single-op package).
+
+## 2026-09-01 — serving TTFT validated with the ~800 µs kernel
+- Full rebuild (had to wipe build/csrc/build*/tree-vendor; cached pip = 2-min no-op
+  that left single-op vendor → CausalConv1dV310 missing → engine init fail once).
+- Bench BS=1, 2048-tok prompts, W8A8, dev 6: **TTFT 1323.5 ms** (was 1467 with
+  4691 µs kernel; −144 ms ≈ per-layer kernel saving). Decode 61.9 ms/tok (no MTP).
+- <1 s TTFT NOT reached — compute_wy now minor in prefill; needs fresh profile
+  to find next dominator.

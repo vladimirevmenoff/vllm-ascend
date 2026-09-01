@@ -14,8 +14,11 @@ and `csrc/moe/chunk_gated_delta_rule_compute_wy/workbench/notes/progress_log.md`
 - Prefill: `chunk_gated_delta_rule_compute_wy` kernel optimized 4691 → ~800 µs
   (787-843 quiet runs, 5.8x) on canonical shape 1,1024,8,16,128,128. All 9 battery
   shapes cos ≥ 0.9999. PR 13122 head = `4faebc035` (single squashed commit).
-- NOT DONE: serving TTFT validation with the final kernel (needs full pip rebuild,
-  see below; last measured serving TTFT was 1467 ms with the 4691 µs kernel).
+- Serving TTFT validated 2026-09-01 with the ~800 µs kernel: **1323.5 ms** mean
+  (1359 p-high, BS=1, 2048-tok prompts, no MTP) vs 1467 ms with the 4691 µs kernel
+  — −144 ms, consistent with per-layer kernel savings. TTFT <1 s NOT reached:
+  compute_wy no longer dominates prefill; next win needs a fresh prefill profile.
+  Decode in same run: 61.9 ms/tok (bench default = no MTP; MTP k=3 config → 37.9).
 - Local branch: `310p-chunk_gated_delta_rule_compute_wy-skill-port` (full commit
   history); PR squash branch: `pr13122-kernel-opt`.
 
@@ -90,9 +93,14 @@ bash /work/repro/run_bench.sh -m /home/models/Qwen3.5-9B-w8a8-modelslim -d 6 -q 
 # -q = --quantization ascend (msModelSlim W8A8); -b batch list; -i/-o token counts
 # results: /work/bench_<ts>/; markdown table: python /work/repro/summarize.py <dir>
 ```
-Reference numbers: fp16 TTFT ~3.2 s; W8A8 + old kernel TTFT 1467 ms, decode
-37.9 ms/tok (MTP k=3). Expected with the new ~800 µs kernel: TTFT well under 1 s
-(unvalidated).
+Reference numbers: fp16 TTFT ~3.2 s; W8A8 + old kernel TTFT 1467 ms; W8A8 + new
+~800 µs kernel TTFT 1323.5 ms (2026-09-01, bench_20260901_115635-era run); decode
+61.9 ms/tok without MTP, 37.9 with MTP k=3.
+Full-rebuild trap: `pip install -e .` with cached build finishes in ~2 min and
+does NOT regenerate the vendor — wipe `build csrc/build csrc/build_out
+vllm_ascend/_cann_ops_custom/vendors` first, then it takes ~15 min and the tree
+vendor `binary_info_config.json` must list all 5 ops (incl CausalConv1dV310),
+not just ChunkGatedDeltaRuleComputeWy — single-op vendor kills engine init.
 
 Manual server (what run_bench.sh does):
 ```bash
