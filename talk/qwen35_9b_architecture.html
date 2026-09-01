@@ -1,0 +1,392 @@
+<title>Qwen3.5-9B — what gets computed and how memory moves</title>
+<style>
+  :root {
+    --paper:#f6f7f9; --panel:#ffffff; --ink:#12171d; --ink-soft:#4a545f; --ink-faint:#7b8794;
+    --rule:#d9dee4; --linear:#0f6f68; --full:#9a5f10; --linear-bg:#e4f1ef; --full-bg:#f6ecdc;
+    --mlp-bg:#eceff3; --hot:#b03a2e; --hot-bg:#f7e6e3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper:#0d1116; --panel:#141a21; --ink:#e6ebf1; --ink-soft:#a2aebb; --ink-faint:#6e7c8a;
+      --rule:#263039; --linear:#4fbfb2; --full:#d9a04a; --linear-bg:#10322f; --full-bg:#33260f;
+      --mlp-bg:#1c232b; --hot:#e8796a; --hot-bg:#361b17;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:#0d1116; --panel:#141a21; --ink:#e6ebf1; --ink-soft:#a2aebb; --ink-faint:#6e7c8a;
+    --rule:#263039; --linear:#4fbfb2; --full:#d9a04a; --linear-bg:#10322f; --full-bg:#33260f;
+    --mlp-bg:#1c232b; --hot:#e8796a; --hot-bg:#361b17;
+  }
+  :root[data-theme="light"] {
+    --paper:#f6f7f9; --panel:#ffffff; --ink:#12171d; --ink-soft:#4a545f; --ink-faint:#7b8794;
+    --rule:#d9dee4; --linear:#0f6f68; --full:#9a5f10; --linear-bg:#e4f1ef; --full-bg:#f6ecdc;
+    --mlp-bg:#eceff3; --hot:#b03a2e; --hot-bg:#f7e6e3;
+  }
+
+  body { background:var(--paper); color:var(--ink); margin:0; padding:3rem 1.5rem 6rem;
+         font-family:ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+         line-height:1.62; -webkit-font-smoothing:antialiased; }
+  .wrap { max-width:62rem; margin:0 auto; display:flex; flex-direction:column; gap:2.75rem; }
+  .prose { max-width:40rem; display:flex; flex-direction:column; gap:1rem; }
+  h1 { font-size:clamp(1.7rem,3.6vw,2.35rem); line-height:1.15; letter-spacing:-.02em; margin:0;
+       text-wrap:balance; font-weight:640; }
+  h2 { font-size:1.22rem; letter-spacing:-.01em; margin:0; font-weight:640; }
+  p { margin:0; }
+  .lede { color:var(--ink-soft); font-size:1.06rem; max-width:44rem; }
+  .eyebrow { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.72rem;
+             letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); margin:0 0 .5rem; }
+  section { display:flex; flex-direction:column; gap:1.1rem; }
+  hr { border:0; border-top:1px solid var(--rule); margin:0; }
+  code,.m { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.88em; }
+  strong { font-weight:640; }
+
+  .bignum { display:grid; grid-template-columns:repeat(auto-fit,minmax(12rem,1fr)); gap:1px;
+            background:var(--rule); border:1px solid var(--rule); border-radius:3px; overflow:hidden; }
+  .bignum > div { background:var(--panel); padding:.9rem 1rem; }
+  .bignum dt { font-size:.7rem; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-faint); }
+  .bignum dd { margin:.2rem 0 0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+               font-size:1.32rem; font-variant-numeric:tabular-nums; }
+  .bignum small { display:block; font-family:ui-sans-serif,system-ui,sans-serif; font-size:.78rem;
+                  color:var(--ink-soft); margin-top:.25rem; line-height:1.4; }
+
+  figure { margin:0; display:flex; flex-direction:column; gap:.7rem; }
+  .canvas { background:var(--panel); border:1px solid var(--rule); border-radius:3px;
+            padding:1.25rem; overflow-x:auto; }
+  svg { display:block; max-width:100%; height:auto; }
+  figcaption { color:var(--ink-soft); font-size:.88rem; max-width:44rem; }
+
+  .box{fill:var(--panel);stroke:var(--rule);stroke-width:1.2}
+  .lbox{fill:var(--linear-bg);stroke:var(--linear);stroke-width:1.2}
+  .fbox{fill:var(--full-bg);stroke:var(--full);stroke-width:1.2}
+  .mbox{fill:var(--mlp-bg);stroke:var(--rule);stroke-width:1.2}
+  .hbox{fill:var(--hot-bg);stroke:var(--hot);stroke-width:1.4}
+  .t{fill:var(--ink);font-family:ui-sans-serif,system-ui,sans-serif;font-size:13px}
+  .tb{fill:var(--ink);font-family:ui-sans-serif,system-ui,sans-serif;font-size:13px;font-weight:620}
+  .ts{fill:var(--ink-soft);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px}
+  .tf{fill:var(--ink-faint);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px}
+  .th{fill:var(--hot);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;font-weight:600}
+  .tl{fill:var(--linear);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;font-weight:600}
+  .ln{stroke:var(--ink-soft);stroke-width:1.3;fill:none}
+  .lnfat{stroke:var(--hot);stroke-width:5;fill:none;opacity:.85}
+  .lnthin{stroke:var(--ink-faint);stroke-width:1.1;fill:none}
+  .lnd{stroke:var(--ink-faint);stroke-width:1.2;fill:none;stroke-dasharray:4 3}
+
+  table { border-collapse:collapse; width:100%; font-size:.9rem; }
+  .tablewrap { overflow-x:auto; border:1px solid var(--rule); border-radius:3px; background:var(--panel); }
+  th,td { text-align:right; padding:.5rem .8rem; border-bottom:1px solid var(--rule); white-space:nowrap; }
+  th:first-child,td:first-child { text-align:left; }
+  thead th { font-size:.72rem; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-faint); font-weight:600; }
+  tbody tr:last-child td { border-bottom:0; }
+  td.num { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-variant-numeric:tabular-nums; }
+  tr.total td { font-weight:640; border-top:1.5px solid var(--rule); }
+  td.note { text-align:left; color:var(--ink-soft); font-size:.85rem; white-space:normal; }
+
+  ol.steps { list-style:none; counter-reset:s; margin:0; padding:0;
+             display:flex; flex-direction:column; gap:1px; background:var(--rule);
+             border:1px solid var(--rule); border-radius:3px; overflow:hidden; }
+  ol.steps > li { counter-increment:s; background:var(--panel); padding:.9rem 1rem .9rem 3rem;
+                  position:relative; }
+  ol.steps > li::before { content:counter(s); position:absolute; left:1rem; top:.9rem;
+                          font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.8rem;
+                          color:var(--ink-faint); font-variant-numeric:tabular-nums; }
+  ol.steps h3 { margin:0 0 .2rem; font-size:.95rem; font-weight:620; }
+  ol.steps p { color:var(--ink-soft); font-size:.9rem; }
+  .bytes { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.82rem;
+           color:var(--hot); font-variant-numeric:tabular-nums; }
+  .callout { border-left:2.5px solid var(--hot); padding:.1rem 0 .1rem 1rem; color:var(--ink-soft);
+             max-width:42rem; }
+</style>
+
+<div class="wrap">
+
+  <header class="prose">
+    <p class="eyebrow">Qwen3.5-9B · decode step · one Ascend 310P3</p>
+    <h1>What gets computed, and what moves</h1>
+    <p class="lede">
+      Generating one token means multiplying an <strong>8 KB vector</strong> against
+      <strong>8.95 GB of weights</strong>. Almost nothing is computed; almost everything is moved.
+      That ratio is the entire performance story, and once you see it the measured numbers stop
+      being surprising.
+    </p>
+  </header>
+
+  <dl class="bignum">
+    <div><dt>State per token</dt><dd>8 KB</dd>
+      <small>the 4096-wide residual vector, fp16</small></div>
+    <div><dt>Weights read per token</dt><dd>8.95 GB</dd>
+      <small>every parameter, once, W8A8</small></div>
+    <div><dt>Arithmetic intensity</dt><dd>1.8 FLOP/B</dd>
+      <small>2 FLOPs per weight byte — nothing is reused</small></div>
+    <div><dt>Measured</dt><dd>62.25 ms</dd>
+      <small>→ 144 GB/s against a 188 GB/s ceiling</small></div>
+  </dl>
+
+  <hr>
+
+  <section>
+    <div class="prose">
+      <h2>1 · The shape of the problem</h2>
+      <p>
+        At batch size 1 every weight is loaded from DRAM, used for exactly one multiply-accumulate
+        per element, and thrown away. A 4096 × 12288 projection reads 50 MB of weights to turn a
+        8 KB vector into a 24 KB vector. The chip's compute units are idle waiting for bytes — the
+        profiler marks <strong>96 % of decode time as memory-bound</strong>, and the pipe mix shows
+        <strong>84 % MTE2</strong>, the pipe that moves data from DRAM.
+      </p>
+    </div>
+
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 880 300" role="img"
+             aria-label="Memory hierarchy contrast. In decode with batch size one, a weight tile is streamed from DRAM through L2 into on-chip buffers, used once, and discarded — the thick arrow from DRAM is the bottleneck. In prefill with 2048 tokens, the same weight tile is loaded once and reused across all 2048 tokens, so the DRAM arrow is thin and the compute units are the constraint.">
+          <defs>
+            <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 0 L10 5 L0 10 z" fill="currentColor"/>
+            </marker>
+          </defs>
+
+          <!-- decode -->
+          <text class="tb" x="14" y="20">DECODE · 1 token</text>
+          <rect class="box" x="14" y="34" width="110" height="86" rx="2"/>
+          <text class="t" x="26" y="54">DRAM</text>
+          <text class="tf" x="26" y="70">44 GB</text>
+          <text class="tf" x="26" y="86">all weights</text>
+          <text class="th" x="26" y="108">8.95 GB/token</text>
+
+          <path class="lnfat" d="M124 76 L214 76" marker-end="url(#a1)" color="var(--hot)"/>
+          <text class="th" x="136" y="66">saturated</text>
+
+          <rect class="box" x="216" y="34" width="96" height="86" rx="2"/>
+          <text class="t" x="228" y="54">L2</text>
+          <text class="tf" x="228" y="70">no reuse:</text>
+          <text class="tf" x="228" y="86">each weight</text>
+          <text class="tf" x="228" y="102">seen once</text>
+
+          <path class="lnfat" d="M312 76 L402 76" marker-end="url(#a1)" color="var(--hot)"/>
+
+          <rect class="box" x="404" y="34" width="110" height="86" rx="2"/>
+          <text class="t" x="416" y="54">L1 / UB</text>
+          <text class="tf" x="416" y="70">weight tile</text>
+          <text class="tf" x="416" y="86">+ 8 KB vector</text>
+
+          <path class="lnthin" d="M514 76 L594 76" marker-end="url(#a1)" color="var(--ink-faint)"/>
+          <rect class="box" x="596" y="34" width="120" height="86" rx="2"/>
+          <text class="t" x="608" y="54">cube / vector</text>
+          <text class="tf" x="608" y="70">mostly idle</text>
+          <text class="tf" x="608" y="86">mac ratio 5 %</text>
+
+          <text class="ts" x="732" y="72">1.8 FLOP</text>
+          <text class="ts" x="732" y="88">per byte</text>
+
+          <line class="lnd" x1="14" y1="150" x2="866" y2="150"/>
+
+          <!-- prefill -->
+          <text class="tb" x="14" y="182">PREFILL · 2048 tokens</text>
+          <rect class="box" x="14" y="196" width="110" height="86" rx="2"/>
+          <text class="t" x="26" y="216">DRAM</text>
+          <text class="tf" x="26" y="232">44 GB</text>
+          <text class="ts" x="26" y="254">8.95 GB</text>
+          <text class="tf" x="26" y="268">for all 2048</text>
+
+          <path class="lnthin" d="M124 238 L214 238" marker-end="url(#a1)" color="var(--ink-faint)"/>
+          <text class="tf" x="132" y="230">same bytes,</text>
+          <text class="tf" x="132" y="256">2048× the work</text>
+
+          <rect class="box" x="216" y="196" width="96" height="86" rx="2"/>
+          <text class="t" x="228" y="216">L2</text>
+          <text class="tf" x="228" y="232">weight tile</text>
+          <text class="tf" x="228" y="248">reused across</text>
+          <text class="tf" x="228" y="264">every token</text>
+
+          <path class="lnfat" d="M312 238 L402 238" marker-end="url(#a1)" color="var(--hot)"/>
+
+          <rect class="box" x="404" y="196" width="110" height="86" rx="2"/>
+          <text class="t" x="416" y="216">L1 / UB</text>
+          <text class="tf" x="416" y="232">weight tile</text>
+          <text class="tf" x="416" y="248">+ 2048×4096</text>
+          <text class="tf" x="416" y="264">activations</text>
+
+          <path class="lnfat" d="M514 238 L594 238" marker-end="url(#a1)" color="var(--hot)"/>
+
+          <rect class="hbox" x="596" y="196" width="120" height="86" rx="2"/>
+          <text class="t" x="608" y="216">cube / vector</text>
+          <text class="th" x="608" y="232">the constraint</text>
+          <text class="tf" x="608" y="248">scalar 45 %</text>
+          <text class="tf" x="608" y="264">issue-bound</text>
+
+          <text class="ts" x="732" y="234">3600 FLOP</text>
+          <text class="ts" x="732" y="250">per byte</text>
+        </svg>
+      </div>
+      <figcaption>
+        The same weights, the same path, opposite bottlenecks. Thick red = the saturated link.
+        Prefill amortises each loaded weight over 2048 tokens; decode amortises it over one.
+      </figcaption>
+    </figure>
+  </section>
+
+  <hr>
+
+  <section>
+    <div class="prose">
+      <h2>2 · One decode step, start to finish</h2>
+      <p>
+        Follow a single token. Bytes in red are DRAM traffic — the thing that actually costs time.
+        Shapes are per token; activations stay in on-chip buffers throughout.
+      </p>
+    </div>
+
+    <ol class="steps">
+      <li>
+        <h3>Embedding lookup</h3>
+        <p>Gather one row out of the 248 320 × 4096 table. The table is 2.03 GB but you touch one row.</p>
+        <p class="bytes">reads 8 KB · writes 8 KB · h = [4096] fp16</p>
+      </li>
+      <li>
+        <h3>× 24 — linear-attention layer</h3>
+        <p>
+          RMSNorm the 8 KB vector, project it to q, k, v and a gate <span class="m">(4096 → 12288,
+          50.3 MB)</span>, run a width-4 causal convolution over its own 3-token history, then update
+          the recurrent state <span class="m">S ← (diag α)S + βkᵀv</span> and read out
+          <span class="m">out = qS</span>. The state is 32 heads × 128 × 128 in fp32 — 2.1 MB, read
+          and written every token. Gate, then project back <span class="m">(4096 → 4096, 16.8 MB)</span>.
+        </p>
+        <p class="bytes">weights 67.4 MB · state 2.1 MB in + 2.1 MB out · per layer</p>
+      </li>
+      <li>
+        <h3>× 8 — full-attention layer</h3>
+        <p>
+          Project q (with its output gate), k and v <span class="m">(41.9 MB)</span>, rotate 64 of the
+          256 head dims, append k and v to the KV cache, attend over everything seen so far, project
+          out <span class="m">(16.8 MB)</span>. At 2048 tokens of context the cache read is 8.4 MB per
+          layer — real, but two orders of magnitude below the weight traffic.
+        </p>
+        <p class="bytes">weights 58.7 MB · KV cache 8.4 MB @ 2k ctx · per layer</p>
+      </li>
+      <li>
+        <h3>× 32 — SwiGLU MLP, after every layer of either kind</h3>
+        <p>
+          Project up to 2 × 12 288 <span class="m">(100.7 MB)</span>, apply silu to one half and
+          multiply, project back down <span class="m">(50.3 MB)</span>. This single block is
+          <strong>151 MB per layer, 4.83 GB per token</strong> — more than half of all traffic.
+        </p>
+        <p class="bytes">weights 151.0 MB · per layer · 54 % of the step</p>
+      </li>
+      <li>
+        <h3>Final norm and vocabulary projection</h3>
+        <p>
+          One last RMSNorm, then multiply the 8 KB vector by the 4096 × 248 320 lm_head. It was left
+          unquantized, so it is read at fp16: <strong>2.03 GB for one matrix</strong>, 18.9 % of the
+          step. Out comes a 248 320-wide logit vector — about 1 MB in fp32, the largest activation
+          anywhere in the model.
+        </p>
+        <p class="bytes">weights 2.03 GB fp16 · writes ~1 MB of logits</p>
+      </li>
+      <li>
+        <h3>Sampling</h3>
+        <p>
+          Greedy is an argmax over those 248 320 values. Top-k / top-p instead has to sort or
+          partition the whole vector — the one place in the whole step where vocabulary size,
+          not weight size, sets the cost.
+        </p>
+        <p class="bytes">reads ~1 MB · writes 1 token id</p>
+      </li>
+    </ol>
+  </section>
+
+  <hr>
+
+  <section>
+    <div class="prose">
+      <h2>3 · The byte budget</h2>
+      <p>
+        Everything above, totalled. This table predicts the measured latency to within a few percent,
+        which is what "memory-bound" actually means in practice.
+      </p>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th>Traffic per decode step</th><th>W8A8</th><th>fp16</th><th>Share (W8A8)</th><th></th></tr>
+        </thead>
+        <tbody>
+          <tr><td>MLP weights, 32 layers</td><td class="num">4.83 GB</td><td class="num">9.66 GB</td><td class="num">54.0 %</td><td class="note">int8 vs fp16</td></tr>
+          <tr><td>lm_head</td><td class="num">2.03 GB</td><td class="num">2.03 GB</td><td class="num">22.7 %</td><td class="note">fp16 in both — never quantized</td></tr>
+          <tr><td>Linear-attention weights, 24 layers</td><td class="num">1.62 GB</td><td class="num">3.24 GB</td><td class="num">18.1 %</td><td class="note"></td></tr>
+          <tr><td>Full-attention weights, 8 layers</td><td class="num">0.47 GB</td><td class="num">0.94 GB</td><td class="num">5.2 %</td><td class="note"></td></tr>
+          <tr><td>GDN recurrent state, 24 layers</td><td class="num">0.10 GB</td><td class="num">0.10 GB</td><td class="num">1.1 %</td><td class="note">fp32, read + written every token</td></tr>
+          <tr><td>KV cache @ 2048 ctx, 8 layers</td><td class="num">0.07 GB</td><td class="num">0.07 GB</td><td class="num">0.7 %</td><td class="note">grows with context</td></tr>
+          <tr class="total"><td>Total</td><td class="num">9.12 GB</td><td class="num">16.04 GB</td><td class="num"></td><td class="note">ratio 1.76×</td></tr>
+          <tr class="total"><td>Measured step time</td><td class="num">62.25 ms</td><td class="num">101.29 ms</td><td class="num"></td><td class="note">ratio 1.63×</td></tr>
+          <tr class="total"><td>Implied bandwidth</td><td class="num">146 GB/s</td><td class="num">158 GB/s</td><td class="num"></td><td class="note">device copy ceiling 188 GB/s</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="callout">
+      Two things fall out of this table. First, W8A8 moves 1.76× fewer bytes and runs 1.63× faster —
+      the gap is the <strong>lm_head, identical in both columns</strong>, diluting the win. Quantize it
+      and the total drops to 8.10 GB, predicting ≈ 55 ms. Second, both configurations land at
+      146–158 GB/s against a measured 188 GB/s copy ceiling, so there is nothing left in the kernels;
+      only fewer bytes or larger batches can help.
+    </p>
+  </section>
+
+  <hr>
+
+  <section>
+    <div class="prose">
+      <h2>4 · Why prefill behaves nothing like this</h2>
+      <p>
+        Prefill reads the same 8.95 GB of weights, but does 2048 tokens' worth of work with them —
+        arithmetic intensity jumps from 1.8 to roughly 3600 FLOP per byte. DRAM stops being the
+        constraint, and the bottleneck moves to how fast the chip can <em>issue</em> work.
+      </p>
+      <p>
+        The measurement confirms it: in prefill the scalar pipe is 45 % of core time and the matrix
+        unit only 12 %, the reverse of decode. The time goes into thousands of tiny tensor
+        operations, not into the GEMMs. In particular the linear-attention layers cannot use their
+        recurrent form — they switch to a chunked algorithm whose triangular solve issues
+        <strong>1512 small reductions</strong> (63 iterations × 24 layers), and that cluster alone is
+        35–41 % of prefill.
+      </p>
+    </div>
+
+    <div class="tablewrap">
+      <table>
+        <thead>
+          <tr><th></th><th>Decode (1 token)</th><th>Prefill (2048 tokens)</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Weight bytes moved</td><td class="num">8.95 GB</td><td class="num">8.95 GB</td></tr>
+          <tr><td>Useful FLOPs</td><td class="num">16 GFLOP</td><td class="num">32.5 TFLOP</td></tr>
+          <tr><td>Arithmetic intensity</td><td class="num">1.8 FLOP/B</td><td class="num">≈3600 FLOP/B</td></tr>
+          <tr><td>Dominant pipe</td><td class="num">MTE2 84 %</td><td class="num">scalar 45 %</td></tr>
+          <tr><td>Matrix-unit ratio</td><td class="num">5 %</td><td class="num">12 %</td></tr>
+          <tr><td>Memory-bound kernels</td><td class="num">96 %</td><td class="num">65 %</td></tr>
+          <tr><td>Measured</td><td class="num">62.25 ms</td><td class="num">1938 ms</td></tr>
+          <tr class="total"><td>Therefore optimise</td><td class="note">fewer weight bytes: quantize lm_head, W4A8, or batch</td><td class="note">fewer, bigger kernels: replace the triangular solve, cut format conversions</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <hr>
+
+  <section class="prose">
+    <h2>5 · The counter-intuitive part</h2>
+    <p>
+      Everything that makes this model architecturally interesting is free. The gated delta rule —
+      24 layers of it — costs <strong>0.92 ms of a 62 ms step</strong>. Attention over the whole
+      context costs 0.64 ms. The recurrent state and the KV cache together are under 2 % of traffic.
+    </p>
+    <p>
+      What costs time is the least interesting matrix in the model: a stack of plain feed-forward
+      projections, plus one enormous vocabulary matrix. When you optimise this model you are almost
+      never optimising attention — you are managing how many bytes of MLP have to cross the memory
+      bus per token.
+    </p>
+  </section>
+
+</div>

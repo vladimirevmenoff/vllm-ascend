@@ -132,3 +132,12 @@ from prior failed builds — filter by date.
   K<128 gram stays on lib (micro-gram rounding shifts gate boundary on weak-decay data).
 - PR 13122 head updated (squash, ~4.3x claim). Next: drop lib for 128-dim path? (lib still used K<128 gram + Init),
   vector cuts (half-domain front, NZ-resident doubling) toward 800.
+
+## 2026-08-31 17:15: TARGET REACHED — ~800us canonical (787-843 quiet, median ~808) = 5.8x
+- Final green build (mm16, PR 4faebc035): all 14 cube calls on WyMicroMm; NZ-resident doubling; I_NZ table;
+  V-load under doubling + storeBuf C-scratch + qHalf W-B-casts (128-dim path only; K<128 keeps mm13 layout + lib gram).
+- Ladder: 4691 -> 1530 (lib-era green) -> 1370 (micro T-updates) -> 1071 (all-micro) -> 812 (NZ-resident) -> ~800 (V overlap).
+- Dead ends: GM/UB-half-C (hang), basic MatmulConfig (m200 incompatible), fused rounds (flat), P==0 exit (toxic),
+  half-domain betaK (double-rounding), lib-Init skip (hang), early-V+storeBuf-scratch on lib-gram path (K64 corruption).
+- NEXT (not done): serving validation — full pip editable rebuild (regenerates tree vendor with ALL ops; box tree vendor
+  currently holds only this op from targeted installs) then TTFT bench vs 1467ms.

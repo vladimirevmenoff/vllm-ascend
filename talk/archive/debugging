@@ -1,0 +1,66 @@
+## 2026-05-19 — kernel produces no output (all sentinel/zero)
+
+### Symptom
+aclnn API GetWorkspaceSize + Execute both return 0 (success), but ALL output
+tensors retain initial values. Kernel binary loads and launches on 310P3.
+
+### Static analysis
+Traced block_scheduler_gdn_fwd_h.hpp: with B=1,HV=1,T=128,K=128,V=128,
+chunk=64 → taskNum=1. Ping-pong pipeline with headInnerLoop=1 should still
+produce Stage2 output for chunk 0. But output is untouched.
+
+### Hypothesis
+Bug Class 9 (MIX-core conditional dead): `ASCEND_IS_AIC` and `ASCEND_IS_AIV`
+both false on 310P3 unified core.
+
+### Verification
+Added printf to kernel entry:
+```
+CORE_MODE blockIdx=0 blockNum=8 is_aic=0 is_aiv=0
+```
+
+**CONFIRMED.** Both flags false. All compute in Process() is gated behind
+`if ASCEND_IS_AIC { ... }` and `if ASCEND_IS_AIV { ... }`, so nothing executes.
+
+### Root cause (TWO bugs)
+1. **Bug Class 9**: MIX-core conditional dead on 310P unified core
+2. **Wrong arch tag**: kernel had `#if __CCE_AICORE__ == 310` for Ascend950,
+   but 310P is `__CCE_AICORE__ == 200`. So 310P fell through to `#else` →
+   CATLASS_ARCH=2201 (AtlasA2) → wrong buffer sizes (UB=192KB not 248KB,
+   L0C=128KB not 256KB) AND wrong L0C→GM copy path.
+
+### Fix applied
+5 files changed:
+
+1. **gdn_fwd_h_kernel.hpp** — Added `__CCE_AICORE__ == 200` to 310 branch
+   (same buffer sizes as Ascend950). Defined `CATLASS_UNIFIED_CORE`.
+   Split Process() → ProcessUnifiedCore() (sequential cube+vector, no
+   CrossCoreSetFlag/WaitFlag) + ProcessSplitCore() (original 910B path).
+
+2. **block_mmad_pingpong_tla_multi.hpp** — Constructor, preSetFlags,
+   finalWaitFlags: `if ASCEND_IS_AIC` → unconditional `{` when
+   `CATLASS_UNIFIED_CORE` defined.
+
+3. **block_epilogue_gdn_fwdh_vnew.hpp** — Skip CrossCoreWaitFlag(cube1Done)
+   when CATLASS_UNIFIED_CORE.
+
+4. **block_epilogue_gdn_fwdh_update.hpp** — Skip CrossCoreWaitFlag(cube2Done)
+   when CATLASS_UNIFIED_CORE.
+
+5. **chunk_gated_delta_rule_fwd_h.cpp** — Added __CCE_AICORE__ to diagnostic
+   printf. Task type stays KERNEL_TYPE_MIX_AIC_1_2 (MIX is implicit for
+   matmul on 310P per behavior-differences.md).
+
+### Key decisions
+- CAST_RINT → CAST_NONE in unified-core initial state copy (310P doesn't
+  support CAST_RINT for half↔float per behavior-differences.md line 109)
+- No ping-pong overlap on unified core — cube and vector run sequentially
+  on same physical core. Correctness first, optimize later.
+- Shared MMAD block modified with `#ifdef CATLASS_UNIFIED_CORE` — only
+  active when included from a kernel that defines it for __CCE_AICORE__==200.
+
+### Pending
+- Rebuild and test
+- If kernel produces output: compare against CPU reference (test_ctypes_chunk.py)
+- CAST_RINT still in epilogue files (float→half direction) — check if 310P needs CAST_NONE there too
+- Precision comparison once kernel works
