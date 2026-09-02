@@ -202,3 +202,16 @@ lives on combined_13122 — separate PRs later.
   4691 µs kernel; −144 ms ≈ per-layer kernel saving). Decode 61.9 ms/tok (no MTP).
 - <1 s TTFT NOT reached — compute_wy now minor in prefill; needs fresh profile
   to find next dominator.
+
+## 2026-09-02 — full-tricks e2e: TTFT 1037 ms + 27.6 ms/tok at BS=1
+- Config: w8a8-lmhead-mtp ckpt, MTP k=3, PIECEWISE, new kernel, 2048-tok real
+  prompts, ignore_eos 256 out. BS sweep: 1: 1037/27.6; 2: 3086/46.2; 4: 3753/49.6;
+  8: 6209/66.9 (TTFT at BS>1 = serialized-prefill queueing; all reqs at t=0).
+- Decode 27.6 beats aug-19 37.86: long-continuation acceptance high (37-88%).
+- BUG: FULL_DECODE_ONLY + new kernel = aicore Illegal instruction (unaligned UB)
+  on first 2048-tok request; reproduced clean dev2; PIECEWISE fine; plain config
+  fine (TTFT 1221); harness green at serving shape 1,2048,16,32,128,128 (Hk=16).
+- PR 13122 restructured: 2 signed commits on main (e4339d241 Dima + 49568cb3d ours),
+  pre-commit/select-tests/DCO green; ci-gate awaits user ready label.
+- Bench infra: bench_tricks.{sh,py} on box (pinned dev, streaming TTFT, token-true
+  TPOT); box crowded — dev6/7 lost to neighbor TP=2 job.
