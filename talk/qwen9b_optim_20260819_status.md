@@ -232,3 +232,11 @@ lives on combined_13122 — separate PRs later.
   CANN vendor — coherence retest lied until full rebuild.
 - e2e numbers from 09-02 (1037/27.6 etc.) measured degenerate text — rerun
   tricks bench on fixed kernel still TODO for honest MTP numbers.
+
+## 2026-09-03 — honest MTP retest on fixed kernel (2048 in / 1024 out, real prompts)
+- Acceptance TRANSFORMED post-fix: was 14-34% (drafting corrupted text), now
+  k=1: 84-88%, k=2: 68-77%, k=3: 48-60%.
+- BS=1: k=0 823ms/57.2 | k=1 916/40.1 | **k=2 952/35.4** | k=3 1008/49.1.
+  BS=4 TPOT: 62.9 / 48.3 / **44.5** / 46.7. New champion: MTP k=2.
+- FULL_DECODE_ONLY+MTP STILL crashes on fixed kernel (4x illegal instruction)
+  → not our NaNs; genuine captured-decode-graph+MTP issue, parked. PIECEWISE.
