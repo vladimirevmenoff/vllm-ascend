@@ -633,9 +633,21 @@ class KernelComputeWy {
 
 
   __aicore__ inline void ProcessOneTask(uint32_t b, uint32_t kHeadIdx, uint32_t vHeadIdx, uint32_t chunkIdx) {
+    // The compensated doubling can overflow half range on rare tasks whose T
+    // outgrows the row-sum gate's estimate (real model data overflows below
+    // the synthetic-sweep bound). The attempt returns false on a non-finite T
+    // BEFORE any GM store; the retry re-derives everything from GM on the
+    // exact scalar path, so a mis-predicted gate costs one task redo, not NaN.
+    if (!ProcessOneTaskAttempt(b, kHeadIdx, vHeadIdx, chunkIdx, /*allowCompDoubling=*/true)) {
+      ProcessOneTaskAttempt(b, kHeadIdx, vHeadIdx, chunkIdx, /*allowCompDoubling=*/false);
+    }
+  }
+
+  __aicore__ inline bool ProcessOneTaskAttempt(uint32_t b, uint32_t kHeadIdx, uint32_t vHeadIdx, uint32_t chunkIdx,
+                                               bool allowCompDoubling) {
     const uint32_t tokenStart = chunkIdx * FIXED_CHUNK_SIZE;
     if (tokenStart + FIXED_CHUNK_SIZE > seqlen_ || kHeadIdx >= kNumHead_ || vHeadIdx >= vNumHead_) {
-      return;
+      return true;
     }
     LocalTensor<half> halfLocal = halfBuf_.Get<half>();
     LocalTensor<half> qHalf = qHalfBuf_.Get<half>();
@@ -705,7 +717,7 @@ class KernelComputeWy {
     // COMP_DOUBLING_MAX_ROW_SUM the intermediate T can outgrow fp16 range
     // (||T|| ~ e^rowsum worst case; half caps at 65504 ~ e^11) and the split
     // cast turns inf — those rows stay on the exact scalar path.
-    const bool useCompDoubling = useFp32ForwardSubstitution && kHeadDim_ >= 128 &&
+    const bool useCompDoubling = allowCompDoubling && useFp32ForwardSubstitution && kHeadDim_ >= 128 &&
                                  gateMaxRowSum_ < COMP_DOUBLING_MAX_ROW_SUM;
     const bool useScalarFallback = useFp32ForwardSubstitution && !useCompDoubling;
     // ---- Build T = (I−A)⁻¹ once (skipped on the fp32 fallback path, which
@@ -730,6 +742,20 @@ class KernelComputeWy {
       // build and then overlaps the W solve (which only touches qHalf/rhs).
       BuildTComp(attnLocal, scratch, cScratch, qHalf, qHalf[ATTEN_ELEMS],
                  halfLocal.template ReinterpretCast<float>());
+      // Overflow rollback: T (fp32, in scratch) must survive the half cast the
+      // solves consume (tHalf). |T| beyond half range means the doubling
+      // overflowed — bail before any GM store and let the caller retry scalar.
+      Abs(cScratch, scratch, ATTEN_ELEMS);
+      PipeBarrier<PIPE_V>();
+      // attnLocal (the doubling's P) is dead once T is final — reuse it as the
+      // 4096-element reduce's work area (reduceScratch is only 64 floats).
+      ReduceMax(reduceScratch, cScratch, attnLocal, ATTEN_ELEMS, /*calIndex=*/false);
+      SyncEvent<HardEvent::V_S>(HardEvent::V_S);
+      const float tMax = reduceScratch.GetValue(0);
+      if (!(tMax < 60000.0f)) {  // catches inf, NaN, and finite half-overflow
+        PipeBarrier<PIPE_ALL>();  // leave clean pipe state for the retry
+        return false;
+      }
       SyncEvent<HardEvent::V_MTE2>(HardEvent::V_MTE2);
       LoadBthdChunk(vGm_, halfLocal, b, tokenStart, vHeadIdx, vNumHead_, vHeadDim_, alignV_);
     }
@@ -808,6 +834,7 @@ class KernelComputeWy {
       StoreQKKernel(b, kHeadIdx, tokenStart, qHalf);
     }
     PipeBarrier<PIPE_ALL>();
+    return true;
   }
 
   TPipe* pipe_{nullptr};
