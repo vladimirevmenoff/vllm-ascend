@@ -215,3 +215,20 @@ lives on combined_13122 — separate PRs later.
   pre-commit/select-tests/DCO green; ci-gate awaits user ready label.
 - Bench infra: bench_tricks.{sh,py} on box (pinned dev, streaming TTFT, token-true
   TPOT); box crowded — dev6/7 lost to neighbor TP=2 job.
+
+## 2026-09-03 — P0 correctness bug found + fixed; TTFT 1198.7 honest
+- Long-prompt serving output was GARBAGE since the micro-mmad era: comp-doubling
+  overflowed on real deep-layer data BELOW the row-sum-14 gate → NaN w/u in
+  layers 13,15-23 → degenerate text. Harness never saw it (synthetic data too
+  benign; per-layer capture + b2b replay was the repro — deterministic).
+- Fix (7fb04d3bc, PR head 7efd48c00): overflow rollback — Abs+ReduceMax on T
+  after doubling; |T|>=60000/NaN → bail pre-store, task retries on exact scalar
+  path. Battery 9/9, 4 trip suites, b2b nan-layers NONE x5, serving coherent
+  short/400/2048, TTFT 1198.7 (vs 1217.7 broken-era — within noise, fix free).
+- Debug chain for the record: coherence probe → torch-path A/B → real-input
+  capture+replay (op green offline!) → sidefx probe (no side effects) → canary
+  (no OOB) → per-layer capture (NaN layers found) → b2b repro → fix.
+- Trap reconfirmed: serving uses TREE vendor; targeted installs only update
+  CANN vendor — coherence retest lied until full rebuild.
+- e2e numbers from 09-02 (1037/27.6 etc.) measured degenerate text — rerun
+  tricks bench on fixed kernel still TODO for honest MTP numbers.
